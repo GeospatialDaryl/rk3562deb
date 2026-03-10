@@ -1154,7 +1154,8 @@ set -euo pipefail
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LOG_FILE="/var/log/rk-update.log"
-INBOX_DIRS=(/update/pending /update /home/chaos/update)
+INBOX_DIRS=(/update/pending /home/chaos/update)
+COMPAT_FILE="/update/update.tar.gz"
 ARCHIVE_DIR="/update/applied"
 FAILED_DIR="/update/failed"
 DUPLICATE_DIR="/update/duplicate"
@@ -1226,6 +1227,12 @@ find_update_package() {
     local dir
     local latest=""
     local candidate
+
+    # Backward-compatible path used by older updater revisions.
+    if [ -f "${COMPAT_FILE}" ]; then
+        echo "${COMPAT_FILE}"
+        return 0
+    fi
 
     for dir in "${INBOX_DIRS[@]}"; do
         [ -d "${dir}" ] || continue
@@ -1429,11 +1436,11 @@ mkdir -p "${ROOTFS_MNT}/update/pending" "${ROOTFS_MNT}/update/applied" "${ROOTFS
 cat > "${ROOTFS_MNT}/update/README.txt" << 'RK_UPDATE_README'
 Drop update package in one of these folders:
 - /update/pending  (recommended)
-- /update
 - /home/chaos/update
 
 No extra command is needed.
 On next boot, rk-apply-update.service applies the newest .tar.gz/.tgz package automatically.
+Compatibility: /update/update.tar.gz is also checked.
 During apply, plymouth spinner is stopped and progress is printed on the console and in /var/log/rk-update.log.
 RK_UPDATE_README
 chroot "${ROOTFS_MNT}" chown -R chaos:chaos /update || true
