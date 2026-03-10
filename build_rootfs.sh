@@ -99,6 +99,13 @@ for optional_pkg in xfce4-pulseaudio-plugin iio-sensor-proxy; do
     fi
 done
 
+# Chromium is often smoother than Firefox on this board for YouTube playback.
+if apt-cache show chromium >/dev/null 2>&1; then
+    apt-get install -y chromium
+else
+    echo "[!] Warning: chromium package not available on current mirror."
+fi
+
 # NetworkManager rejects plugin modules unless owned by root.
 find /usr/lib -type f -path '*/NetworkManager/*/libnm-*.so' \
     -exec chown root:root {} + 2>/dev/null || true
@@ -528,17 +535,47 @@ set -eu
 
 PATH=/usr/bin:/bin
 
-if pgrep -x blueman-applet >/dev/null 2>&1; then
-    exit 0
-fi
-
-# Wait briefly for session DBus/panel startup to avoid autostart races.
+# Wait for session DBus/panel startup to avoid autostart races.
 for _ in $(seq 1 20); do
     dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
       /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1 && break
     sleep 1
 done
 
+panel_has_tray() {
+    xfconf-query -c xfce4-panel -lv 2>/dev/null | awk '
+    $1 ~ /^\/plugins\/plugin-[0-9]+$/ && ($2 == "systray" || $2 == "statusnotifier" || $2 == "indicator") { found=1 }
+    END { exit(found ? 0 : 1) }'
+}
+
+ensure_panel() {
+    if ! pgrep -x xfce4-panel >/dev/null 2>&1; then
+        xfce4-panel >/dev/null 2>&1 &
+        sleep 2
+    fi
+}
+
+repair_panel_if_needed() {
+    if ! command -v xfconf-query >/dev/null 2>&1; then
+        return 0
+    fi
+    if panel_has_tray; then
+        return 0
+    fi
+    # Reset panel config if tray plugins are missing; this restores defaults.
+    pkill -x xfce4-panel >/dev/null 2>&1 || true
+    rm -f "${HOME}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
+    rm -rf "${HOME}/.config/xfce4/panel"
+    xfce4-panel >/dev/null 2>&1 &
+    sleep 3
+}
+
+ensure_panel
+repair_panel_if_needed
+
+# Always restart to re-register the tray icon after panel/tray recovery.
+pkill -x blueman-applet >/dev/null 2>&1 || true
+sleep 1
 exec blueman-applet
 RK_BLUEMAN_START
 chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-blueman-applet-start.sh"
@@ -728,6 +765,210 @@ mkdir -p "${ROOTFS_MNT}/etc/systemd/system/timers.target.wants"
 ln -sf /etc/systemd/system/rk-bluetooth-recover.timer \
     "${ROOTFS_MNT}/etc/systemd/system/timers.target.wants/rk-bluetooth-recover.timer"
 
+# Harden bluetooth.service startup ordering for Seekwave BT.
+echo "[*] Installing Bluetooth service override..."
+mkdir -p "${ROOTFS_MNT}/etc/systemd/system/bluetooth.service.d"
+cat > "${ROOTFS_MNT}/etc/systemd/system/bluetooth.service.d/rk-skwbt.conf" << 'RK_BT_OVERRIDE'
+[Unit]
+After=systemd-modules-load.service rk-unblock-rfkill.service
+Wants=rk-unblock-rfkill.service
+
+[Service]
+ExecStartPre=/usr/sbin/modprobe skwbt
+ExecStartPre=/usr/sbin/rfkill unblock all
+ExecStartPost=/bin/sh -c 'printf "power on\nquit\n" | /usr/bin/bluetoothctl >/dev/null 2>&1 || true'
+Restart=on-failure
+RestartSec=2
+RK_BT_OVERRIDE
+
+# Auto-rotate display/touchscreen based on accelerometer readings.
+echo "[*] Installing accelerometer auto-rotate service..."
+mkdir -p "${ROOTFS_MNT}/usr/local/sbin"
+cat > "${ROOTFS_MNT}/usr/local/sbin/rk-autorotate.py" << 'RK_AUTOROTATE'
+#!/usr/bin/env python3
+import array
+import fcntl
+import os
+import pwd
+import re
+import subprocess
+import time
+
+SENSOR_DEV = "/dev/mma8452_daemon"
+GSENSOR_IOCTL_START = 0x6103
+GSENSOR_IOCTL_APP_SET_RATE = 0x40026110
+GSENSOR_IOCTL_GETDATA = 0x800D6108
+
+POLL_SECONDS = 0.5
+THRESHOLD = 6000
+STABLE_SAMPLES = 3
+
+MATRICES = {
+    "normal": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    "left": [0, -1, 1, 1, 0, 0, 0, 0, 1],
+    "right": [0, 1, 0, -1, 0, 1, 0, 0, 1],
+    "inverted": [-1, 0, 1, 0, -1, 1, 0, 0, 1],
+}
+
+
+def run_user(cmd):
+    user = "chaos"
+    uid = pwd.getpwnam(user).pw_uid
+    env_cmd = [
+        "runuser",
+        "-u",
+        user,
+        "--",
+        "env",
+        "DISPLAY=:0",
+        "XAUTHORITY=/home/chaos/.Xauthority",
+        f"XDG_RUNTIME_DIR=/run/user/{uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+    ]
+    return subprocess.run(env_cmd + cmd, text=True, capture_output=True)
+
+
+def connected_output():
+    res = run_user(["xrandr", "--query"])
+    if res.returncode != 0:
+        return None
+    outputs = []
+    for line in res.stdout.splitlines():
+        if " connected" in line and "disconnected" not in line:
+            outputs.append(line.split()[0])
+    if not outputs:
+        return None
+    for prefix in ("DSI", "eDP", "LVDS"):
+        for out in outputs:
+            if out.startswith(prefix):
+                return out
+    return outputs[0]
+
+
+def touchscreen_devices():
+    res = run_user(["xinput", "list", "--name-only"])
+    if res.returncode != 0:
+        return []
+    devs = []
+    for line in res.stdout.splitlines():
+        name = line.strip()
+        if re.search(r"(gsl3673|touchscreen|touch)", name, re.IGNORECASE):
+            devs.append(name)
+    return devs
+
+
+def apply_orientation(orientation):
+    output = connected_output()
+    if not output:
+        return False
+    xr = run_user(["xrandr", "--output", output, "--rotate", orientation])
+    if xr.returncode != 0:
+        return False
+
+    matrix = MATRICES[orientation]
+    for dev in touchscreen_devices():
+        run_user(
+            [
+                "xinput",
+                "set-prop",
+                dev,
+                "Coordinate Transformation Matrix",
+                *[str(v) for v in matrix],
+            ]
+        )
+    return True
+
+
+def open_sensor():
+    fd = os.open(SENSOR_DEV, os.O_RDWR | os.O_CLOEXEC)
+    fcntl.ioctl(fd, GSENSOR_IOCTL_START, 0)
+    rate = array.array("h", [20])
+    fcntl.ioctl(fd, GSENSOR_IOCTL_APP_SET_RATE, rate, True)
+    return fd
+
+
+def read_axis(fd):
+    vals = array.array("i", [0, 0, 0])
+    fcntl.ioctl(fd, GSENSOR_IOCTL_GETDATA, vals, True)
+    return vals[0], vals[1], vals[2]
+
+
+def detect_orientation(x, y):
+    ax = abs(x)
+    ay = abs(y)
+    if ax < THRESHOLD and ay < THRESHOLD:
+        return None
+    if ax >= ay:
+        return "left" if x > 0 else "right"
+    return "inverted" if y > 0 else "normal"
+
+
+def main():
+    fd = None
+    current = None
+    pending = None
+    pending_count = 0
+
+    while True:
+        try:
+            if fd is None:
+                if not os.path.exists(SENSOR_DEV):
+                    time.sleep(1.0)
+                    continue
+                fd = open_sensor()
+
+            x, y, _ = read_axis(fd)
+            orient = detect_orientation(x, y)
+            if orient is None:
+                time.sleep(POLL_SECONDS)
+                continue
+
+            if orient == pending:
+                pending_count += 1
+            else:
+                pending = orient
+                pending_count = 1
+
+            if pending_count >= STABLE_SAMPLES and orient != current:
+                if apply_orientation(orient):
+                    current = orient
+
+            time.sleep(POLL_SECONDS)
+        except Exception:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            fd = None
+            time.sleep(1.0)
+
+
+if __name__ == "__main__":
+    main()
+RK_AUTOROTATE
+chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-autorotate.py"
+
+cat > "${ROOTFS_MNT}/etc/systemd/system/rk-autorotate.service" << 'RK_AUTOROTATE_UNIT'
+[Unit]
+Description=Auto-rotate display using accelerometer
+After=graphical.target lightdm.service
+Wants=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rk-autorotate.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target
+RK_AUTOROTATE_UNIT
+
+mkdir -p "${ROOTFS_MNT}/etc/systemd/system/graphical.target.wants"
+ln -sf /etc/systemd/system/rk-autorotate.service \
+    "${ROOTFS_MNT}/etc/systemd/system/graphical.target.wants/rk-autorotate.service"
+
 # Initialize ALSA controls at boot so speaker/mic paths are sane on RK817.
 echo "[*] Installing ALSA init service..."
 mkdir -p "${ROOTFS_MNT}/usr/local/sbin"
@@ -913,21 +1154,101 @@ set -euo pipefail
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LOG_FILE="/var/log/rk-update.log"
-PKG_FILE="/update/update.tar.gz"
+INBOX_DIRS=(/update/pending /update /home/chaos/update)
+ARCHIVE_DIR="/update/applied"
+FAILED_DIR="/update/failed"
+DUPLICATE_DIR="/update/duplicate"
 STATE_DIR="/var/lib/rk-update"
 STAMP_FILE="${STATE_DIR}/last_applied.sha256"
 TMP_DIR=""
 BOOT_WAS_MOUNTED=0
 BOOT_PART_DEV=""
 REBOOT_NEEDED=0
+HEARTBEAT_PID=""
+PKG_FILE=""
 
 mkdir -p "${STATE_DIR}"
 touch "${LOG_FILE}"
 exec >> "${LOG_FILE}" 2>&1
 
+say() {
+    local msg="$*"
+    local line="[$(date -Iseconds)] rk-apply-update: ${msg}"
+    echo "${line}"
+    printf '%s\n' "${line}" > /dev/console 2>/dev/null || true
+    printf '%s\n' "${line}" > /dev/tty1 2>/dev/null || true
+}
+
+hide_boot_splash() {
+    if command -v plymouth >/dev/null 2>&1; then
+        plymouth quit 2>/dev/null || true
+    fi
+    systemctl stop plymouth-start.service plymouth-quit.service plymouth-quit-wait.service 2>/dev/null || true
+}
+
+start_heartbeat() {
+    (
+        while true; do
+            sleep 15
+            say "Update in progress... do not power off."
+        done
+    ) &
+    HEARTBEAT_PID=$!
+}
+
+stop_heartbeat() {
+    if [ -n "${HEARTBEAT_PID}" ]; then
+        kill "${HEARTBEAT_PID}" 2>/dev/null || true
+        wait "${HEARTBEAT_PID}" 2>/dev/null || true
+        HEARTBEAT_PID=""
+    fi
+}
+
+archive_package() {
+    local src="$1"
+    local dst_dir="$2"
+    local suffix="$3"
+    local base
+    local name
+    local ts
+    base="$(basename "${src}")"
+    case "${base}" in
+        *.tar.gz) name="${base%.tar.gz}" ;;
+        *.tgz) name="${base%.tgz}" ;;
+        *) name="${base}" ;;
+    esac
+    ts="$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "${dst_dir}"
+    mv -f "${src}" "${dst_dir}/${name}-${suffix}-${ts}.tar.gz"
+}
+
+find_update_package() {
+    local dir
+    local latest=""
+    local candidate
+
+    for dir in "${INBOX_DIRS[@]}"; do
+        [ -d "${dir}" ] || continue
+        candidate="$(find "${dir}" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2- || true)"
+        [ -n "${candidate}" ] || continue
+        if [ -z "${latest}" ]; then
+            latest="${candidate}"
+            continue
+        fi
+        if [ "${candidate}" -nt "${latest}" ]; then
+            latest="${candidate}"
+        fi
+    done
+
+    [ -n "${latest}" ] || return 1
+    echo "${latest}"
+}
+
 echo "=== $(date -Iseconds) rk-apply-update: start ==="
+say "Checking for offline update package..."
 
 cleanup() {
+    stop_heartbeat
     if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
         rm -rf "${TMP_DIR}"
     fi
@@ -937,33 +1258,41 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ ! -f "${PKG_FILE}" ]; then
-    echo "No package present at ${PKG_FILE}; nothing to do."
+PKG_FILE="$(find_update_package || true)"
+if [ -z "${PKG_FILE}" ]; then
+    say "No update package found in: ${INBOX_DIRS[*]}"
     exit 0
 fi
 
+say "Found update package: ${PKG_FILE}"
+hide_boot_splash
+say "Applying update package now."
+start_heartbeat
+
 PKG_SUM="$(sha256sum "${PKG_FILE}" | awk '{print $1}')"
 if [ -f "${STAMP_FILE}" ] && grep -qx "${PKG_SUM}" "${STAMP_FILE}"; then
-    DUP_FILE="/update/update-duplicate-$(date +%Y%m%d-%H%M%S).tar.gz"
-    mv -f "${PKG_FILE}" "${DUP_FILE}" || true
-    echo "Package ${PKG_SUM} already applied; archived duplicate as ${DUP_FILE}."
+    archive_package "${PKG_FILE}" "${DUPLICATE_DIR}" "duplicate" || true
+    say "Package ${PKG_SUM} already applied; moved duplicate package."
     exit 0
 fi
 
 TMP_DIR="$(mktemp -d /var/tmp/rk-update.XXXXXX)"
 if ! tar -xzf "${PKG_FILE}" -C "${TMP_DIR}"; then
-    echo "Failed to extract ${PKG_FILE}; leaving package untouched."
+    archive_package "${PKG_FILE}" "${FAILED_DIR}" "extract-failed" || true
+    say "Failed to extract ${PKG_FILE}; moved package to ${FAILED_DIR}."
     exit 1
 fi
 
 if [ ! -d "${TMP_DIR}/rootfs" ] && [ ! -d "${TMP_DIR}/boot" ]; then
-    echo "Package missing both rootfs/ and boot/ payloads."
+    archive_package "${PKG_FILE}" "${FAILED_DIR}" "invalid-layout" || true
+    say "Package missing both rootfs/ and boot/ payloads; moved to ${FAILED_DIR}."
     exit 1
 fi
 
 if [ -d "${TMP_DIR}/rootfs" ]; then
-    echo "Applying rootfs payload..."
+    say "Applying rootfs payload..."
     tar -C "${TMP_DIR}/rootfs" -cpf - . | tar -C / -xpf -
+    say "Rootfs payload applied."
 fi
 
 find_boot_partition() {
@@ -1018,15 +1347,15 @@ if [ -d "${TMP_DIR}/boot" ]; then
             if mount "${BOOT_PART_DEV}" /boot; then
                 BOOT_WAS_MOUNTED=1
             else
-                echo "Failed to mount boot partition ${BOOT_PART_DEV}; skipping boot payload."
+                say "Failed to mount boot partition ${BOOT_PART_DEV}; skipping boot payload."
             fi
         else
-            echo "Unable to resolve boot partition; skipping boot payload."
+            say "Unable to resolve boot partition; skipping boot payload."
         fi
     fi
 
     if mountpoint -q /boot; then
-        echo "Applying boot payload..."
+        say "Applying boot payload..."
         mkdir -p /boot/extlinux
         if [ -f "${TMP_DIR}/boot/Image" ]; then
             install -m 0644 "${TMP_DIR}/boot/Image" /boot/Image
@@ -1041,23 +1370,31 @@ if [ -d "${TMP_DIR}/boot" ]; then
             REBOOT_NEEDED=1
         fi
         sync
+        say "Boot payload applied."
     fi
 fi
 
 echo "${PKG_SUM}" > "${STAMP_FILE}"
 chmod 0600 "${STAMP_FILE}" || true
 
-APPLIED_FILE="/update/update-applied-$(date +%Y%m%d-%H%M%S).tar.gz"
+mkdir -p "${ARCHIVE_DIR}"
+PKG_BASE="$(basename "${PKG_FILE}")"
+case "${PKG_BASE}" in
+    *.tar.gz) PKG_BASE="${PKG_BASE%.tar.gz}" ;;
+    *.tgz) PKG_BASE="${PKG_BASE%.tgz}" ;;
+esac
+APPLIED_FILE="${ARCHIVE_DIR}/${PKG_BASE}-applied-$(date +%Y%m%d-%H%M%S).tar.gz"
 mv -f "${PKG_FILE}" "${APPLIED_FILE}"
 sync
 
-echo "Update applied successfully; archived package as ${APPLIED_FILE}"
+say "Update applied successfully; archived package as ${APPLIED_FILE}"
 
 # Rootfs payload may replace binaries/libraries used by current boot. Reboot
 # once after apply to ensure a clean and consistent runtime state.
 REBOOT_NEEDED=1
 if [ "${REBOOT_NEEDED}" -eq 1 ]; then
-    echo "Rebooting to finalize update..."
+    stop_heartbeat
+    say "Rebooting to finalize update..."
     systemctl --no-block reboot
 fi
 
@@ -1067,7 +1404,7 @@ chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-apply-update.sh"
 
 cat > "${ROOTFS_MNT}/etc/systemd/system/rk-apply-update.service" << 'RK_APPLY_UPDATE_UNIT'
 [Unit]
-Description=Apply offline update package from /update/update.tar.gz
+Description=Apply offline update package from /update/pending or /update
 DefaultDependencies=no
 After=local-fs.target
 Before=multi-user.target lightdm.service graphical.target
@@ -1077,6 +1414,8 @@ ConditionPathExists=/usr/local/sbin/rk-apply-update.sh
 Type=oneshot
 ExecStart=/usr/local/sbin/rk-apply-update.sh
 TimeoutSec=0
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
@@ -1086,13 +1425,20 @@ mkdir -p "${ROOTFS_MNT}/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/rk-apply-update.service \
     "${ROOTFS_MNT}/etc/systemd/system/multi-user.target.wants/rk-apply-update.service"
 
-mkdir -p "${ROOTFS_MNT}/update"
+mkdir -p "${ROOTFS_MNT}/update/pending" "${ROOTFS_MNT}/update/applied" "${ROOTFS_MNT}/update/failed" "${ROOTFS_MNT}/update/duplicate"
 cat > "${ROOTFS_MNT}/update/README.txt" << 'RK_UPDATE_README'
-Drop update package here as: /update/update.tar.gz
-On next boot, rk-apply-update.service will apply it automatically.
+Drop update package in one of these folders:
+- /update/pending  (recommended)
+- /update
+- /home/chaos/update
+
+No extra command is needed.
+On next boot, rk-apply-update.service applies the newest .tar.gz/.tgz package automatically.
+During apply, plymouth spinner is stopped and progress is printed on the console and in /var/log/rk-update.log.
 RK_UPDATE_README
 chroot "${ROOTFS_MNT}" chown -R chaos:chaos /update || true
 chroot "${ROOTFS_MNT}" chmod 0775 /update || true
+chroot "${ROOTFS_MNT}" install -d -m 0775 -o chaos -g chaos /home/chaos/update || true
 
 # 12. Expand rootfs service
 echo "[*] Adding first-boot rootfs expand..."
