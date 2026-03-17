@@ -456,7 +456,8 @@ if [ ! -f /usr/lib/aarch64-linux-gnu/librk_hw_base.so ]; then
     echo "[*] Building rk_hw_base..."
     git clone --depth=1 https://github.com/sujit-168/rk_hw_base /tmp/rk_hw_base
     cd /tmp/rk_hw_base
-    make
+    make CFLAGS="-I./include -I/usr/include/rockchip -I/usr/include/rga -fPIC -Wall -O2" \
+         LDFLAGS="-shared -L/usr/lib/aarch64-linux-gnu"
     cp lib/librk_hw_base.so /usr/lib/aarch64-linux-gnu/
     mkdir -p /usr/include/rk_hw_base
     cp include/*.h /usr/include/rk_hw_base/
@@ -481,6 +482,7 @@ fi
 
 # Clean up build-only dependencies
 apt-get purge -y libva-dev libdrm-dev pkg-config 2>/dev/null || true
+apt-get autoremove -y 2>/dev/null || true
 
 echo "[+] Rockchip VAAPI driver ready."
 BUILD_VAAPI_EOF
