@@ -680,9 +680,10 @@ chroot "${ROOTFS_MNT}" plymouth-set-default-theme rkdebian 2>/dev/null || \
     echo "[!] Warning: could not set Plymouth theme; 'spinner' will be used"
 
 # Add Chromium hardware acceleration flags.
-# Mali G52 EGL exposes EGL_KHR_platform_gbm — Chromium Ozone can use native
-# EGL via GBM for GPU compositing (no EGL_KHR_platform_wayland needed).
-# --use-gl=egl                           : native Mali EGL (GBM platform)
+# This Chromium build only allows ANGLE-based GL backends; --use-gl=egl
+# (native GLES) is not in the allowed list. We use --use-angle=opengles which
+# routes ANGLE through the Mali GBM GLES driver for hardware GPU compositing.
+# --use-gl=angle --use-angle=opengles   : ANGLE via Mali GBM GLES driver
 # --ignore-gpu-blocklist                 : allow GPU rasterization on Mali
 # --enable-gpu-rasterization             : tile rasterization via GLES
 # --disable-gpu-sandbox                  : VAAPI driver needs /dev/mpp_service
@@ -695,33 +696,35 @@ mkdir -p "${ROOTFS_MNT}/etc/chromium.d"
 if [ "${FF_VAAPI_ENABLED}" = "true" ]; then
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_HW_FLAGS'
 # RK3562 hardware acceleration — sourced by /usr/bin/chromium wrapper
-# Native Mali EGL (GBM platform) for compositing.
+# ANGLE backed by Mali GLES (angle=opengles) for GPU compositing.
 # VAAPI hardware video decode via rockchip_drv_video.so + MPP.
+# Note: --use-gl=egl (native EGL) is not in the allowed list for this build;
+# --use-angle=opengles routes ANGLE through the Mali GBM GLES driver instead.
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=egl"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-gpu-sandbox"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-accelerated-video-decode"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-features=VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-features=UseChromeOSDirectVideoDecoder"
-# ── FALLBACK: if Mali EGL crashes Chromium, replace --use-gl=egl above with: ──
-# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+# ── FALLBACK: if Mali GLES crashes, replace --use-angle=opengles with: ──
 # CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=swiftshader"
 CHROMIUM_HW_FLAGS
 else
-    # No rockchip VAAPI driver — native Mali EGL compositing, software video decode.
+    # No rockchip VAAPI driver — ANGLE/Mali GLES compositing, software video decode.
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_SW_FLAGS'
-# RK3562 — native Mali EGL compositing, software video decode
+# RK3562 — ANGLE/Mali GLES compositing, software video decode
 # (VAAPI driver not found at build time)
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=egl"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
-# ── FALLBACK: if Mali EGL crashes Chromium, replace --use-gl=egl above with: ──
-# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+# ── FALLBACK: if Mali GLES crashes, replace --use-angle=opengles with: ──
 # CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=swiftshader"
 CHROMIUM_SW_FLAGS
 fi
