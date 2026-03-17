@@ -716,6 +716,21 @@ static void rk817_shutdown_prepare(void)
 			   (0x3 << 2), (0x0 << 2));
 
 	/*
+	 * Set BAT_CON (bit 4 of GG_STS / reg 0x57) so the fuel gauge
+	 * driver re-initialises from OCV voltage on the next boot.
+	 *
+	 * The SOC data registers (0x9A-0x9F) do not survive a full PMIC
+	 * power-off (DEV_OFF) and reset to zero.  Without this, the driver
+	 * takes the "not first power on" path on next boot, reads back 0%,
+	 * and reports an empty battery.  Setting BAT_CON here forces the
+	 * "first power on" path which derives SOC from live OCV voltage.
+	 */
+	raw = i2c_smbus_read_byte_data(rk808_i2c_client, 0x57);
+	if (raw >= 0)
+		i2c_smbus_write_byte_data(rk808_i2c_client, 0x57,
+					  (u8)(raw | BIT(4)));
+
+	/*
 	 * Write DEV_OFF (bit 0 of SYS_CFG3 / reg 0xf4) directly via
 	 * i2c_smbus, bypassing regmap cache entirely.
 	 *

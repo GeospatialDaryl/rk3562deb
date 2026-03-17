@@ -671,38 +671,49 @@ chroot "${ROOTFS_MNT}" plymouth-set-default-theme rkdebian 2>/dev/null || \
     echo "[!] Warning: could not set Plymouth theme; 'spinner' will be used"
 
 # Add Chromium hardware acceleration flags.
-# Mali G52 is on Chromium's GPU blocklist; --ignore-gpu-blocklist overrides.
-# --use-gl=egl        : use EGL instead of GLX (required for Mali userspace)
-# --enable-gpu-rasterization: GPU-accelerated 2D compositing
-# --enable-zero-copy  : share DMA-BUF textures directly, avoids CPU readback
-# VaapiVideoDecoder   : VAAPI path for H.264/VP9 hardware decode via MPP
-# UseChromeOSDirectVideoDecoder is the CrOS-only decode path; disable it so
-# the standard Linux VAAPI path is used instead.
+# Mali G52 EGL does not expose EGL_KHR_platform_wayland, so it cannot provide
+# an ANGLE context for Chromium's GPU process on Wayland. Instead we use
+# Chromium's built-in SwiftShader (software GLES) for GPU compositing —
+# Sway/Mali handles the final display so UI remains smooth.
+# VAAPI video decode (rockchip_drv_video.so via MPP) runs in a separate
+# process and does not depend on the GL backend, giving hardware H.264/HEVC.
+# --use-gl=angle --use-angle=swiftshader : Chromium built-in software GLES
+# --ignore-gpu-blocklist                 : allow GPU rasterization on Mali
+# --enable-gpu-rasterization             : tile rasterization via GLES
+# --disable-gpu-sandbox                  : VAAPI driver needs /dev/mpp_service
+# --enable-accelerated-video-decode      : opt-in for HW video decode
+# VaapiVideoDecoder                      : VAAPI H.264/HEVC decode path
+# VaapiIgnoreDriverChecks               : bypass Chromium driver name allowlist
+# UseChromeOSDirectVideoDecoder disabled : use standard Linux VAAPI, not CrOS
 echo "[*] Adding Chromium acceleration flags..."
 mkdir -p "${ROOTFS_MNT}/etc/chromium.d"
 if [ "${FF_VAAPI_ENABLED}" = "true" ]; then
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_HW_FLAGS'
 # RK3562 hardware acceleration — sourced by /usr/bin/chromium wrapper
+# SwiftShader provides the GLES context (Mali EGL lacks Wayland platform support).
+# VAAPI hardware video decode works independently via rockchip_drv_video.so + MPP.
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=swiftshader"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-zero-copy"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-features=VaapiVideoDecoder,VaapiVideoDecodeLinuxGL"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-gpu-sandbox"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-accelerated-video-decode"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-features=VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-features=UseChromeOSDirectVideoDecoder"
 CHROMIUM_HW_FLAGS
 else
-    # No rockchip VAAPI driver — still force EGL and unblock GPU rasterization
-    # so compositing uses Mali rather than llvmpipe.
-    cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_EGL_FLAGS'
-# RK3562 EGL/GPU-raster only (no VAAPI driver found at build time)
+    # No rockchip VAAPI driver — SwiftShader for compositing, software video decode.
+    cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_SW_FLAGS'
+# RK3562 SwiftShader only (no VAAPI driver found at build time)
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=swiftshader"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
-CHROMIUM_EGL_FLAGS
+CHROMIUM_SW_FLAGS
 fi
 
 # 8. Setting hostname and fstab
