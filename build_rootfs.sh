@@ -97,9 +97,8 @@ apt-get update -qq
 # swaybg:   wallpaper setter.
 # wofi:     Wayland-native app launcher (replaces rofi/dmenu for touch).
 # jq:       JSON parsing used by the rotation tray app (swaymsg output).
-# Note: xwayland intentionally disabled for a pure Wayland session.
-# foot: Wayland-native terminal — required because xwayland is disabled so
-# xfce4-terminal and other X11 terminals won't launch in this session.
+# xwayland: keep enabled for compatibility with legacy X11 desktop apps.
+# foot: Wayland-native terminal (still preferred).
 apt-get install -y sway swaybg wofi jq foot mako-notifier
 
 # wvkbd: Wayland-native on-screen keyboard (wlroots virtual-keyboard protocol).
@@ -1687,6 +1686,17 @@ SWAY_SESSION
 
 # sway configuration
 mkdir -p "${ROOTFS_MNT}/home/chaos/.config/sway"
+
+# NetworkManager tray applet wrapper — larger GTK scale so the Wi-Fi menu is
+# easier to read/tap on touchscreens.
+cat > "${ROOTFS_MNT}/usr/local/bin/rk-nm-applet-start.sh" << 'RK_NM_APPLET'
+#!/bin/sh
+export GDK_SCALE=3
+export GDK_DPI_SCALE=0.90
+exec nm-applet --indicator
+RK_NM_APPLET
+chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-nm-applet-start.sh"
+
 cat > "${ROOTFS_MNT}/home/chaos/.config/sway/config" << 'SWAY_CFG'
 ### Variables
 set $mod Mod4
@@ -1694,8 +1704,8 @@ set $term foot
 set $menu /usr/local/bin/rk-launcher.sh
 set $kbd  /usr/local/bin/rk-keyboard-toggle.sh
 
-### Disable Xwayland — Mali glamor crashes under Xwayland (same as X11)
-xwayland disable
+### Keep Xwayland enabled for app compatibility in sway session
+xwayland enable
 
 ### Output — 800×1280 portrait panel; default landscape = 90° CW
 # rk-screen-rotate.py will update this at runtime; setting it here avoids
@@ -1753,7 +1763,8 @@ bar {
 
 ### Autostart
 exec /usr/local/bin/rk-screen-rotate.py
-exec nm-applet --indicator
+exec /usr/local/bin/rk-nm-applet-start.sh
+exec blueman-applet
 exec mako
 # squeekboard: auto-shows when a text field gains focus (input-method protocol).
 # No-op if not installed.
@@ -2049,7 +2060,7 @@ cat > "${ROOTFS_MNT}/home/chaos/.config/waybar/config" << 'WAYBAR_CFG'
     "spacing": 0,
     "modules-left": ["custom/apps", "custom/kbd", "custom/close"],
     "modules-center": ["clock"],
-    "modules-right": ["tray", "custom/backlight", "pulseaudio", "battery", "network", "custom/power"],
+    "modules-right": ["tray", "custom/bluetooth", "custom/backlight", "pulseaudio", "battery", "network", "custom/power"],
 
     "custom/apps": {
         "format": "Apps",
@@ -2080,6 +2091,13 @@ cat > "${ROOTFS_MNT}/home/chaos/.config/waybar/config" << 'WAYBAR_CFG'
     "tray": {
         "spacing": 10,
         "icon-size": 22
+    },
+    "custom/bluetooth": {
+        "format": "BT",
+        "on-click": "blueman-manager",
+        "on-click-touch": "blueman-manager",
+        "tooltip": false,
+        "min-width": 48
     },
     "custom/backlight": {
         "exec": "echo \"$(brightnessctl get | awk '{printf \"%d\", $1 * 100 / 255}')%☀\"",
@@ -2137,7 +2155,7 @@ window#waybar {
 }
 
 /* Right side modules */
-#clock, #tray, #custom-backlight, #pulseaudio, #battery, #network, #custom-power {
+#clock, #tray, #custom-bluetooth, #custom-backlight, #pulseaudio, #battery, #network, #custom-power {
     padding: 0 10px;
     color: #c0caf5;
 }
@@ -2172,6 +2190,7 @@ window#waybar {
 #battery.charging{ color: #73daca; }
 #network         { color: #7dcfff; }
 #pulseaudio      { color: #bb9af7; }
+#custom-bluetooth { color: #8be9fd; font-weight: bold; }
 #custom-backlight { color: #b4f9f8; }
 #custom-power    { color: #f7768e; font-weight: bold; }
 WAYBAR_CSS
