@@ -468,6 +468,8 @@ fi
 if [ ! -f /usr/lib/aarch64-linux-gnu/dri/rockchip_drv_video.so ]; then
     echo "[*] Building rockchip_drv_video.so..."
     git clone --depth=1 https://github.com/sujit-168/rk_vaapi_driver /tmp/rk_vaapi_driver
+    # Ensure rk_hw_base sibling is present (may be missing on re-run if already installed)
+    [ -d /tmp/rk_hw_base ] || git clone --depth=1 https://github.com/sujit-168/rk_hw_base /tmp/rk_hw_base
     cd /tmp/rk_vaapi_driver
     make
     mkdir -p /usr/lib/aarch64-linux-gnu/dri
@@ -478,7 +480,7 @@ if [ ! -f /usr/lib/aarch64-linux-gnu/dri/rockchip_drv_video.so ]; then
 fi
 
 # Clean up build-only dependencies
-apt-get purge -y --auto-remove libva-dev libdrm-dev pkg-config 2>/dev/null || true
+apt-get purge -y libva-dev libdrm-dev pkg-config 2>/dev/null || true
 
 echo "[+] Rockchip VAAPI driver ready."
 BUILD_VAAPI_EOF
