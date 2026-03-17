@@ -76,7 +76,7 @@ apt-get install -y sudo curl wget nano vim openssh-server network-manager wpasup
     pulseaudio pulseaudio-utils pulseaudio-module-bluetooth pavucontrol alsa-utils libasound2-plugins \
     zram-tools \
     plymouth plymouth-themes \
-    libegl1 libgles2 libgbm1 ffmpeg dbus \
+    libegl1 libgles2 libgbm1 libva2 libva-drm2 ffmpeg dbus \
     udev evtest lightdm pciutils usbutils \
     xinput libinput-tools \
     python3 python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
@@ -97,7 +97,7 @@ apt-get update -qq
 # swaybg:   wallpaper setter.
 # wofi:     Wayland-native app launcher (replaces rofi/dmenu for touch).
 # jq:       JSON parsing used by the rotation tray app (swaymsg output).
-# Note: xwayland disabled — Mali glamor crashes under Xwayland same as X11.
+# Note: xwayland intentionally disabled for a pure Wayland session.
 # foot: Wayland-native terminal — required because xwayland is disabled so
 # xfce4-terminal and other X11 terminals won't launch in this session.
 apt-get install -y sway swaybg wofi jq foot mako-notifier
@@ -276,24 +276,15 @@ if [ -d "${ROOT_DIR}/debs" ]; then
     fi
 fi
 
-# 5b. Install Mali userspace library from mali/ directory
-if [ -d "${ROOT_DIR}/mali" ]; then
-    echo "[*] Installing Mali userspace library..."
-    mkdir -p "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu"
-    if compgen -G "${ROOT_DIR}/mali/*.so" > /dev/null; then
-        cp -f "${ROOT_DIR}/mali/"*.so "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/"
-    fi
-    # Create standard symlinks for libmali
-    cd "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu"
-    for so in libmali*.so; do
-        [ -f "$so" ] || continue
-        ln -sf "$so" libEGL.so.1 2>/dev/null || true
-        ln -sf "$so" libGLESv2.so.2 2>/dev/null || true
-        ln -sf "$so" libgbm.so.1 2>/dev/null || true
-        ln -sf "$so" libOpenCL.so.1 2>/dev/null || true
-    done
-    cd "${ROOT_DIR}"
+# 5b. Prefer Mali EGL/GBM from the installed libmali package over Mesa shims.
+if compgen -G "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libmali*.so" > /dev/null; then
+    echo "[*] Removing conflicting Mesa EGL/GBM files..."
+    rm -f "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libEGL_mesa.so.0"*
+    rm -f "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libgbm.so.1"*
+    rm -f "${ROOTFS_MNT}/usr/share/glvnd/egl_vendor.d/50_mesa.json"
     chroot "${ROOTFS_MNT}" ldconfig
+else
+    echo "[!] Warning: Mali userspace package not detected; skipping Mesa cleanup."
 fi
 
 # 6. Install WiFi/BT firmware
@@ -602,6 +593,13 @@ for y in range(H):
 write_png(sys.argv[1], W, H, rows)
 PYGEN
 
+# splash.png — custom boot logo from repository root
+if [ ! -f "${ROOT_DIR}/splash.png" ]; then
+    echo "[-] Error: missing ${ROOT_DIR}/splash.png (required for Plymouth logo)."
+    exit 1
+fi
+install -m 0644 "${ROOT_DIR}/splash.png" "${THEME_DIR}/splash.png"
+
 # Theme descriptor
 cat > "${THEME_DIR}/rkdebian.plymouth" << 'PLYMOUTH_DESC'
 [Plymouth Theme]
@@ -619,36 +617,27 @@ cat > "${THEME_DIR}/rkdebian.script" << 'PLYMOUTH_SCRIPT'
 W = Window.GetWidth();
 H = Window.GetHeight();
 
-# Deep navy → near-black vertical gradient
-Window.SetBackgroundTopColor(0.04, 0.07, 0.17);
-Window.SetBackgroundBottomColor(0.01, 0.02, 0.07);
+# Solid black background
+Window.SetBackgroundTopColor(0.00, 0.00, 0.00);
+Window.SetBackgroundBottomColor(0.00, 0.00, 0.00);
 
-# ── Title ──────────────────────────────────────────────────────────────────
-title = Image.Text("RK3562", 0.88, 0.93, 1.00, 1.0, "DejaVu Sans Bold 36");
-title_spr = Sprite();
-title_spr.SetImage(title);
-title_spr.SetX(Math.Int(W / 2 - title.GetWidth()  / 2));
-title_spr.SetY(Math.Int(H * 0.37));
-
-# ── Subtitle ───────────────────────────────────────────────────────────────
-sub = Image.Text("Debian GNU/Linux", 0.38, 0.55, 0.82, 1.0, "DejaVu Sans 15");
-sub_spr = Sprite();
-sub_spr.SetImage(sub);
-sub_spr.SetX(Math.Int(W / 2 - sub.GetWidth() / 2));
-sub_spr.SetY(title_spr.GetY() + title.GetHeight() + 10);
-
-# ── Divider line ───────────────────────────────────────────────────────────
-line_img = Image("line.png");
-line_spr = Sprite();
-line_spr.SetImage(line_img);
-line_spr.SetX(Math.Int(W / 2 - line_img.GetWidth() / 2));
-line_spr.SetY(sub_spr.GetY() + sub.GetHeight() + 22);
-line_spr.SetOpacity(0.45);
+# ── Logo ───────────────────────────────────────────────────────────────────
+logo_base = Image("splash.png");
+logo_scale_w = (W * 0.78) / logo_base.GetWidth();
+logo_scale_h = (H * 0.45) / logo_base.GetHeight();
+logo_scale = Math.Min(logo_scale_w, logo_scale_h);
+if (logo_scale > 1.0) logo_scale = 1.0;
+logo = logo_base.Scale(logo_base.GetWidth() * logo_scale,
+                       logo_base.GetHeight() * logo_scale);
+logo_spr = Sprite();
+logo_spr.SetImage(logo);
+logo_spr.SetX(Math.Int(W / 2 - logo.GetWidth() / 2));
+logo_spr.SetY(Math.Int(H * 0.18));
 
 # ── Pulsing dot loader (5 dots, wave ripple) ───────────────────────────────
 N      = 5;
 STEP   = 22;
-DOT_Y  = Math.Int(H * 0.67);
+DOT_Y  = Math.Int(H * 0.73);
 ORIGIN = Math.Int(W / 2 - (N - 1) * STEP / 2);
 
 dot_img = Image("dot.png");
@@ -680,52 +669,39 @@ chroot "${ROOTFS_MNT}" plymouth-set-default-theme rkdebian 2>/dev/null || \
     echo "[!] Warning: could not set Plymouth theme; 'spinner' will be used"
 
 # Add Chromium hardware acceleration flags.
-# This Chromium build only allows ANGLE-based GL backends; --use-gl=egl
-# (native GLES) is not in the allowed list. We use --use-angle=opengles which
-# routes ANGLE through the Mali GBM GLES driver for hardware GPU compositing.
-# --use-gl=angle --use-angle=opengles   : ANGLE via Mali GBM GLES driver
-# --ignore-gpu-blocklist                 : allow GPU rasterization on Mali
-# --enable-gpu-rasterization             : tile rasterization via GLES
-# --disable-gpu-sandbox                  : VAAPI driver needs /dev/mpp_service
-# --enable-accelerated-video-decode      : opt-in for HW video decode
-# VaapiVideoDecoder                      : VAAPI H.264/HEVC decode path
-# VaapiIgnoreDriverChecks               : bypass Chromium driver name allowlist
-# UseChromeOSDirectVideoDecoder disabled : use standard Linux VAAPI, not CrOS
 echo "[*] Adding Chromium acceleration flags..."
 mkdir -p "${ROOTFS_MNT}/etc/chromium.d"
 if [ "${FF_VAAPI_ENABLED}" = "true" ]; then
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_HW_FLAGS'
 # RK3562 hardware acceleration — sourced by /usr/bin/chromium wrapper
-# ANGLE backed by Mali GLES (angle=opengles) for GPU compositing.
+# Native Mali EGL (wayland-gbm platform) for GPU compositing.
 # VAAPI hardware video decode via rockchip_drv_video.so + MPP.
-# Note: --use-gl=egl (native EGL) is not in the allowed list for this build;
-# --use-angle=opengles routes ANGLE through the Mali GBM GLES driver instead.
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=egl"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-gpu-sandbox"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-accelerated-video-decode"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-features=VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-features=UseChromeOSDirectVideoDecoder"
-# ── FALLBACK: if Mali GLES crashes, replace --use-angle=opengles with: ──
-# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=swiftshader"
+# ── FALLBACK: if --use-gl=egl crashes, try ANGLE instead: ──
+# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
 CHROMIUM_HW_FLAGS
 else
-    # No rockchip VAAPI driver — ANGLE/Mali GLES compositing, software video decode.
+    # No rockchip VAAPI driver — native Mali EGL compositing, software video decode.
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_SW_FLAGS'
-# RK3562 — ANGLE/Mali GLES compositing, software video decode
+# RK3562 — Native Mali EGL compositing, software video decode
 # (VAAPI driver not found at build time)
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=egl"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
-# ── FALLBACK: if Mali GLES crashes, replace --use-angle=opengles with: ──
-# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=swiftshader"
+# ── FALLBACK: if --use-gl=egl crashes, try ANGLE instead: ──
+# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
+# CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
 CHROMIUM_SW_FLAGS
 fi
 
@@ -1221,16 +1197,17 @@ cat > "${ROOTFS_MNT}/usr/local/bin/rk-screen-rotate.py" << 'RK_SCREEN_ROTATE'
 #!/usr/bin/env python3
 """System-tray applet for screen rotation on RK3562 tablet.
 
-Works in both X11 (XFCE) and Wayland (labwc) sessions.
+Works in both X11 (XFCE) and Wayland (sway/wlroots) sessions.
 
 Under X11:  uses xrandr for display rotation and xinput for touch mapping.
-Under Wayland: uses wlr-randr for display rotation; the compositor
-               (wlroots/labwc) automatically remaps touch coordinates, so
-               no xinput step is needed.
+Under Wayland: uses swaymsg output transforms, maps the touchscreen to the
+               active output, and resets stale calibration matrices.
 """
 
 import array
 import fcntl
+import glob
+import json
 import os
 import re
 import subprocess
@@ -1288,28 +1265,39 @@ WL_TRANSFORMS = {
     "inverted": "180",
 }
 
-# libinput calibration matrices for Wayland (6 elements: a b c d e f)
-# map_to_output doesn't update touch coords on this platform so we set manually.
-# Each matrix is the inverse of the output transform applied to [0,1] touch coords.
-WL_TOUCH_MATRICES = {
-    "normal":   [1,  0, 0,  0,  1, 0],   # identity
-    "right":    [0,  1, 0, -1,  0, 1],   # output transform 90  (CCW)
-    "left":     [0, -1, 1,  1,  0, 0],   # output transform 270 (CW)
-    "inverted": [-1, 0, 1,  0, -1, 1],   # output transform 180
-}
-
 ICON_DEFAULT = "video-display"
+IDENTITY_TOUCH_MATRIX = "1 0 0 0 1 0"
+
+
+def _swaysock_path():
+    """Best-effort SWAYSOCK lookup for non-interactive contexts."""
+    env_sock = os.environ.get("SWAYSOCK", "")
+    if env_sock and os.path.exists(env_sock):
+        return env_sock
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime:
+        socks = sorted(glob.glob(os.path.join(runtime, "sway-ipc.*.sock")))
+        if socks:
+            return socks[-1]
+    return None
+
+
+def _swaymsg(args):
+    """Run swaymsg with explicit socket fallback when needed."""
+    cmd = ["swaymsg"]
+    sock = _swaysock_path()
+    if sock:
+        cmd += ["--socket", sock]
+    cmd += list(args)
+    return subprocess.run(cmd, text=True, capture_output=True)
 
 
 def _sway_output():
     """Return the name of the first active sway output via swaymsg JSON."""
-    res = subprocess.run(
-        ["swaymsg", "-t", "get_outputs"], text=True, capture_output=True
-    )
+    res = _swaymsg(["-t", "get_outputs"])
     if res.returncode != 0:
         return None
     try:
-        import json
         outputs = json.loads(res.stdout)
         for o in outputs:
             if o.get("active"):
@@ -1356,19 +1344,42 @@ def _x11_touchscreen_devices():
 
 def _sway_touch_identifier():
     """Return the sway input identifier for the first touch device."""
-    res = subprocess.run(
-        ["swaymsg", "-t", "get_inputs"], text=True, capture_output=True
-    )
+    res = _swaymsg(["-t", "get_inputs"])
     if res.returncode != 0:
         return None
     try:
-        import json
         for dev in json.loads(res.stdout):
             if dev.get("type") == "touch":
                 return dev["identifier"]
     except Exception:
         pass
     return None
+
+
+def _wayland_current_orientation():
+    """Read current active output transform and map it to our orientation key."""
+    res = _swaymsg(["-t", "get_outputs"])
+    if res.returncode != 0:
+        return "normal"
+    try:
+        outputs = json.loads(res.stdout)
+        target = None
+        for out in outputs:
+            if out.get("active"):
+                target = out
+                break
+        if target is None and outputs:
+            target = outputs[0]
+        transform = str((target or {}).get("transform", "normal"))
+        mapping = {
+            "normal": "normal",
+            "90": "right",
+            "180": "inverted",
+            "270": "left",
+        }
+        return mapping.get(transform, "normal")
+    except Exception:
+        return "normal"
 
 
 def apply_orientation(orientation):
@@ -1378,23 +1389,15 @@ def apply_orientation(orientation):
         if not output:
             return False
         # Rotate the output
-        res = subprocess.run(
-            ["swaymsg", "output", output, "transform",
-             WL_TRANSFORMS[orientation]],
-            capture_output=True,
-        )
+        res = _swaymsg(["output", output, "transform", WL_TRANSFORMS[orientation]])
         if res.returncode != 0:
             return False
-        # map_to_output doesn't update touch coords on this platform;
-        # set the libinput calibration matrix manually.
+        # Keep touch mapped to the active output and clear stale calibration.
         touch_id = _sway_touch_identifier()
         if touch_id:
-            mat = WL_TOUCH_MATRICES[orientation]
-            subprocess.run(
-                ["swaymsg", "--", "input", touch_id, "calibration_matrix",
-                 " ".join(str(v) for v in mat)],
-                capture_output=True,
-            )
+            _swaymsg(["--", "input", touch_id, "map_to_output", output])
+            _swaymsg(["--", "input", touch_id, "calibration_matrix",
+                      IDENTITY_TOUCH_MATRIX])
         return True
     else:
         # xrandr --rotate (including --rotate normal) crashes the X server with
@@ -1508,7 +1511,7 @@ class AccelReader:
 # ---------------------------------------------------------------------------
 class RotateTray:
     def __init__(self):
-        self._current = "normal"
+        self._current = _wayland_current_orientation() if IS_WAYLAND else "normal"
         self._auto = False
         self._accel = AccelReader(self._on_accel_orient)
 
@@ -1613,6 +1616,9 @@ def main():
         SENSOR_DEV, os.R_OK | os.W_OK
     )
     app = RotateTray()
+    if IS_WAYLAND:
+        # Ensure touch mapping starts in sync with the current transform.
+        apply_orientation(app._current)
     if auto_start:
         app._auto = True
         app._auto_item.set_active(True)
@@ -1691,14 +1697,14 @@ set $kbd  /usr/local/bin/rk-keyboard-toggle.sh
 ### Disable Xwayland — Mali glamor crashes under Xwayland (same as X11)
 xwayland disable
 
-### Output — 800×1280 portrait panel; default landscape = 270° CW
+### Output — 800×1280 portrait panel; default landscape = 90° CW
 # rk-screen-rotate.py will update this at runtime; setting it here avoids
 # the portrait flash while the tray applet starts.
-output DSI-1 transform 270
+output DSI-1 transform 90
 output * bg #1a1b26 solid_color
 
 ### Input
-input type:touchscreen {
+input type:touch {
     tap enabled
     natural_scroll disabled
     map_to_output DSI-1
@@ -2453,8 +2459,6 @@ say() {
     local msg="$*"
     local line="[$(date -Iseconds)] rk-apply-update: ${msg}"
     echo "${line}"
-    printf '%s\n' "${line}" > /dev/console 2>/dev/null || true
-    printf '%s\n' "${line}" > /dev/tty1 2>/dev/null || true
 }
 
 hide_boot_splash() {
@@ -2698,8 +2702,8 @@ ConditionPathExists=/usr/local/sbin/rk-apply-update.sh
 Type=oneshot
 ExecStart=/usr/local/sbin/rk-apply-update.sh
 TimeoutSec=0
-StandardOutput=journal+console
-StandardError=journal+console
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -2718,7 +2722,7 @@ Drop update package in one of these folders:
 No extra command is needed.
 On next boot, rk-apply-update.service applies the newest .tar.gz/.tgz package automatically.
 Compatibility: /update/update.tar.gz is also checked.
-During apply, plymouth spinner is stopped and progress is printed on the console and in /var/log/rk-update.log.
+During apply, plymouth spinner is stopped and progress is logged in /var/log/rk-update.log.
 RK_UPDATE_README
 chroot "${ROOTFS_MNT}" chown -R chaos:chaos /update || true
 chroot "${ROOTFS_MNT}" chmod 0775 /update || true

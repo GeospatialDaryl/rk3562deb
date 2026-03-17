@@ -13,14 +13,14 @@ OUTPUT_DIR="${ROOT_DIR}/output"
 # Versions & URLs
 UBOOT_URL="https://github.com/Firefly-rk-linux/u-boot.git"
 UBOOT_BRANCH="rk356x/firefly-5.10"
-KERNEL_URL="https://github.com/Firefly-rk-linux/kernel.git"
-KERNEL_BRANCH="rk356x/firefly-5.10"
+KERNEL_URL="https://github.com/rockchip-linux/kernel.git"
+KERNEL_BRANCH="develop-6.1"
 RKBIN_URL="https://github.com/rockchip-linux/rkbin.git"
 RKBIN_BRANCH="master"
 
 # RK3562 configs
 UBOOT_DEFCONFIG="rk3562_defconfig"
-KERNEL_DEFCONFIG="firefly_linux_defconfig"
+KERNEL_DEFCONFIG="rockchip_linux_defconfig"
 KERNEL_DTB="rk3562-rk817-tablet-v10.dtb"
 
 CROSS_COMPILE="aarch64-linux-gnu-"
@@ -134,29 +134,28 @@ build_kernel() {
         cp -r "${ROOT_DIR}/overlay/." .
 
         if [ -d .git ]; then
-            # Keep overlay kernel fixes by default.
-            # Set RKDEBIAN_RESTORE_UPSTREAM_KERNEL_FILES=1 to force restoring
-            # selected files from upstream when bisecting build issues.
-            if [ "${RKDEBIAN_RESTORE_UPSTREAM_KERNEL_FILES:-0}" = "1" ]; then
-                local restore_overlay_files=(
-                    "drivers/mfd/rk808.c"
-                    "drivers/power/supply/rk817_battery.c"
-                    "drivers/power/supply/rk817_charger.c"
-                )
+            local pmic_overlay_files=(
+                "drivers/mfd/rk808.c"
+                "drivers/power/supply/rk817_battery.c"
+                "drivers/power/supply/rk817_charger.c"
+            )
 
-                for file in "${restore_overlay_files[@]}"; do
+            if [ "${RKDEBIAN_KEEP_OVERLAY_PMIC_PATCHES:-0}" = "1" ]; then
+                echo "[!] Keeping overlay PMIC kernel files (RKDEBIAN_KEEP_OVERLAY_PMIC_PATCHES=1)."
+            else
+                # Kernel 6.1 baseline: prefer upstream PMIC drivers first.
+                # Set RKDEBIAN_KEEP_OVERLAY_PMIC_PATCHES=1 to re-enable overlay versions.
+                for file in "${pmic_overlay_files[@]}"; do
                     if [ -f "${ROOT_DIR}/overlay/${file}" ]; then
-                        echo "[!] Restoring upstream kernel file for ${file} (RKDEBIAN_RESTORE_UPSTREAM_KERNEL_FILES=1)."
+                        echo "[*] Restoring upstream kernel file for ${file}."
                         git checkout -- "${file}"
                     fi
                 done
-            else
-                echo "[*] Keeping overlay kernel files (set RKDEBIAN_RESTORE_UPSTREAM_KERNEL_FILES=1 to restore upstream versions)."
             fi
         fi
     fi
 
-    # Firefly kernel uses a specific path for their saved defconfig, arch/arm64/configs/firefly_linux_defconfig
+    # Use the configured defconfig, with a rockchip fallback if needed.
     if [ ! -f "arch/arm64/configs/${KERNEL_DEFCONFIG}" ]; then
         echo "Warning: ${KERNEL_DEFCONFIG} not found. Attempting rockchip_linux_defconfig..."
         KERNEL_DEFCONFIG="rockchip_linux_defconfig"
