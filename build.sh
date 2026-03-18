@@ -265,9 +265,43 @@ create_image() {
     rm -rf "${OUT_DIR}/tmp"
     mkdir -p "${OUT_DIR}/tmp"
 
-    echo "[*] Creating deterministic rootfs.ext4 image..."
+    echo "[*] Creating rootfs.ext4 image..."
     rm -f "${OUT_DIR}/rootfs.ext4"
-    truncate -s 6G "${OUT_DIR}/rootfs.ext4"
+
+    # Size policy:
+    # - default: auto (rootfs apparent size + headroom, aligned)
+    #   * headroom: ROOTFS_HEADROOM_MB (default 512)
+    #   * floor:    ROOTFS_MIN_MB      (default 2560)
+    # - override: ROOTFS_IMAGE_SIZE=<size> (examples: 4G, 3584M)
+    # The rootfs is expanded on first boot by expand-rootfs.service, so we keep
+    # the build artifact compact while preserving enough installation headroom.
+    local rootfs_image_size="${ROOTFS_IMAGE_SIZE:-auto}"
+    if [ "${rootfs_image_size}" = "auto" ]; then
+        local rootfs_used_bytes reserve_bytes min_bytes align_bytes size_bytes
+        local reserve_mb min_mb
+        reserve_mb="${ROOTFS_HEADROOM_MB:-512}"
+        min_mb="${ROOTFS_MIN_MB:-2560}"
+        case "${reserve_mb}" in
+            ''|*[!0-9]*) reserve_mb=512 ;;
+        esac
+        case "${min_mb}" in
+            ''|*[!0-9]*) min_mb=2560 ;;
+        esac
+        rootfs_used_bytes=$(sudo du -s -B1 "${OUT_DIR}/rootfs" | awk '{print $1}')
+        reserve_bytes=$((reserve_mb * 1024 * 1024))
+        min_bytes=$((min_mb * 1024 * 1024))
+        align_bytes=$((64 * 1024 * 1024))       # align to 64 MiB
+        size_bytes=$((rootfs_used_bytes + reserve_bytes))
+        if [ "${size_bytes}" -lt "${min_bytes}" ]; then
+            size_bytes="${min_bytes}"
+        fi
+        size_bytes=$(( ( (size_bytes + align_bytes - 1) / align_bytes ) * align_bytes ))
+        echo "[*] rootfs usage: $((rootfs_used_bytes / 1024 / 1024)) MiB; headroom: ${reserve_mb} MiB; image size: $((size_bytes / 1024 / 1024)) MiB"
+        truncate -s "${size_bytes}" "${OUT_DIR}/rootfs.ext4"
+    else
+        echo "[*] Using ROOTFS_IMAGE_SIZE=${rootfs_image_size}"
+        truncate -s "${rootfs_image_size}" "${OUT_DIR}/rootfs.ext4"
+    fi
 
     # NetworkManager refuses non-root-owned device plugins; fix ownership in
     # source rootfs before packing the final image.
@@ -281,6 +315,9 @@ create_image() {
         -E lazy_itable_init=0,lazy_journal_init=0 \
         -O ^metadata_csum_seed,^orphan_file \
         "${OUT_DIR}/rootfs.ext4"
+
+    # Keep a bit more usable free space on small images.
+    sudo tune2fs -m 1 "${OUT_DIR}/rootfs.ext4" >/dev/null 2>&1 || true
 
     if ! sudo e2fsck -pf "${OUT_DIR}/rootfs.ext4"; then
         echo "[-] Error: rootfs.ext4 consistency check failed."

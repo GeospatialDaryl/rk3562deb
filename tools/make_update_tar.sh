@@ -23,7 +23,8 @@ for required in "${BOOT_DIR}/Image" "${BOOT_DIR}/rk3562.dtb" "${BOOT_DIR}/extlin
 done
 
 echo "[*] Creating offline update package..."
-rm -rf "${STAGE_DIR}"
+# Stage dir can contain root-owned files from prior sudo tar runs.
+sudo rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}/rootfs" "${STAGE_DIR}/boot/extlinux" "${OUTPUT_DIR}"
 
 echo "[*] Staging rootfs payload..."
@@ -60,5 +61,5 @@ mkdir -p "$(dirname "${PKG_PATH}")"
 sudo tar -C "${STAGE_DIR}" -czf "${PKG_PATH}" .
 sudo chown "$(id -u):$(id -g)" "${PKG_PATH}" || true
 
-rm -rf "${STAGE_DIR}"
+sudo rm -rf "${STAGE_DIR}"
 echo "[+] Update package ready: ${PKG_PATH}"

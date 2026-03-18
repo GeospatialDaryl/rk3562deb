@@ -80,6 +80,8 @@ apt-get install -y sudo curl wget nano vim openssh-server network-manager wpasup
     udev evtest lightdm pciutils usbutils \
     xinput libinput-tools \
     python3 python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
+    qt6-wayland \
+    i2c-tools \
     iproute2 iputils-ping dnsutils locales tzdata xfce4-power-manager upower brightnessctl rfkill \
     vainfo vdpauinfo \
     onboard wireless-regdb firmware-brcm80211 \
@@ -224,7 +226,12 @@ systemctl enable plymouth-start.service plymouth-quit.service plymouth-quit-wait
 CHROOT_EOF
 
 chmod +x "${ROOTFS_MNT}/tmp/setup_debian.sh"
-chroot "${ROOTFS_MNT}" /tmp/setup_debian.sh
+if [ ! -f "${ROOTFS_MNT}/tmp/setup_debian.sh" ]; then
+    echo "[-] Missing chroot setup script: ${ROOTFS_MNT}/tmp/setup_debian.sh"
+    exit 1
+fi
+# Run through /bin/bash explicitly to avoid direct-exec/shebang edge cases.
+chroot "${ROOTFS_MNT}" /bin/bash /tmp/setup_debian.sh
 rm "${ROOTFS_MNT}/tmp/setup_debian.sh"
 
 # Ensure privilege-escalation binaries/configs keep root ownership and setuid/setperm bits.
@@ -1897,17 +1904,43 @@ exec /usr/local/bin/rk-power-dialog.py
 RK_POWER_MENU
 chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-power-menu.sh"
 
-# App launcher — always kills stale wofi then opens fresh; uses current screen
-# dimensions so it fills the display correctly in both portrait and landscape.
+# App launcher toggle — first press opens the app grid, second press closes it.
+# Uses current screen dimensions so it fills correctly in portrait/landscape.
 cat > "${ROOTFS_MNT}/usr/local/bin/rk-launcher.sh" << 'RK_LAUNCHER'
 #!/bin/sh
-pkill -x wofi 2>/dev/null
-sleep 0.05
+if pgrep -x wofi >/dev/null 2>&1; then
+    pkill -x wofi >/dev/null 2>&1 || true
+    exit 0
+fi
+
+find_sway_sock() {
+    uid="$(id -u)"
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${uid}}"
+
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "${SWAYSOCK}" ] && \
+       swaymsg -s "${SWAYSOCK}" -t get_version >/dev/null 2>&1; then
+        echo "${SWAYSOCK}"
+        return 0
+    fi
+
+    for s in "${runtime_dir}"/sway-ipc.*.sock "${runtime_dir}"/sway*.sock; do
+        [ -S "${s}" ] || continue
+        if swaymsg -s "${s}" -t get_version >/dev/null 2>&1; then
+            echo "${s}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Read current output dimensions from sway
-DIMS=$(SWAYSOCK=$(ls /run/user/1000/sway*.sock 2>/dev/null | head -1) \
-  swaymsg -t get_outputs 2>/dev/null | \
-  python3 -c "import sys,json; o=json.load(sys.stdin)[0]['rect']; print(o['width'], o['height'])" 2>/dev/null)
+SOCK="$(find_sway_sock || true)"
+if [ -n "${SOCK}" ]; then
+    DIMS=$(SWAYSOCK="${SOCK}" swaymsg -t get_outputs 2>/dev/null | \
+      python3 -c "import sys,json; o=json.load(sys.stdin)[0]['rect']; print(o['width'], o['height'])" 2>/dev/null)
+else
+    DIMS=""
+fi
 
 W=$(echo "$DIMS" | cut -d' ' -f1)
 H=$(echo "$DIMS" | cut -d' ' -f2)
@@ -1932,6 +1965,46 @@ exec wofi --show drun \
           2>/dev/null
 RK_LAUNCHER
 chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-launcher.sh"
+
+# Close action button helper:
+# - If app launcher is open, close launcher.
+# - Otherwise close focused app/window.
+cat > "${ROOTFS_MNT}/usr/local/bin/rk-close-action.sh" << 'RK_CLOSE_ACTION'
+#!/bin/sh
+if pgrep -x wofi >/dev/null 2>&1; then
+    pkill -x wofi >/dev/null 2>&1 || true
+    exit 0
+fi
+
+find_sway_sock() {
+    uid="$(id -u)"
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${uid}}"
+
+    if [ -n "${SWAYSOCK:-}" ] && [ -S "${SWAYSOCK}" ] && \
+       swaymsg -s "${SWAYSOCK}" -t get_version >/dev/null 2>&1; then
+        echo "${SWAYSOCK}"
+        return 0
+    fi
+
+    for s in "${runtime_dir}"/sway-ipc.*.sock "${runtime_dir}"/sway*.sock; do
+        [ -S "${s}" ] || continue
+        if swaymsg -s "${s}" -t get_version >/dev/null 2>&1; then
+            echo "${s}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+SOCK="$(find_sway_sock || true)"
+if [ -n "${SOCK}" ]; then
+    exec swaymsg -s "${SOCK}" kill >/dev/null 2>&1
+fi
+
+# Last-resort attempt (works when SWAYSOCK is valid in environment).
+exec swaymsg kill >/dev/null 2>&1
+RK_CLOSE_ACTION
+chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-close-action.sh"
 
 # wvkbd toggle — shows/hides the on-screen keyboard at the bottom of the screen.
 # wvkbd-mobintl is the standard mobile-international layout binary.
@@ -2208,8 +2281,8 @@ cat > "${ROOTFS_MNT}/home/chaos/.config/waybar/config" << 'WAYBAR_CFG'
     },
     "custom/close": {
         "format": "Close",
-        "on-click": "swaymsg kill",
-        "on-click-touch": "swaymsg kill",
+        "on-click": "/usr/local/bin/rk-close-action.sh",
+        "on-click-touch": "/usr/local/bin/rk-close-action.sh",
         "tooltip": false,
         "min-width": 70
     },
@@ -2578,6 +2651,106 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 RK_POWER_TUNE_UNIT
 chroot "${ROOTFS_MNT}" systemctl enable rk-power-tune.service
+
+# 10d. RK817 battery gauge recovery (fixes occasional false 0% after cold-off).
+echo "[*] Installing RK817 battery gauge recovery service..."
+cat > "${ROOTFS_MNT}/usr/local/sbin/rk-battery-gauge-fix.sh" << 'RK_BAT_GAUGE_FIX'
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LOG_FILE="/var/log/rk-battery-gauge-fix.log"
+CAP_FILE="/sys/class/power_supply/battery/capacity"
+VOLT_FILE="/sys/class/power_supply/battery/voltage_now"
+
+say() {
+    echo "[$(date -Iseconds)] rk-battery-gauge-fix: $*" >> "${LOG_FILE}"
+}
+
+read_int_file() {
+    file="$1"
+    if [ -f "${file}" ]; then
+        tr -cd '0-9' < "${file}"
+    fi
+}
+
+is_power_online() {
+    for p in /sys/class/power_supply/ac/online /sys/class/power_supply/usb/online; do
+        [ -f "${p}" ] || continue
+        val="$(read_int_file "${p}")"
+        [ -n "${val}" ] && [ "${val}" -eq 1 ] && return 0
+    done
+    return 1
+}
+
+mkdir -p /var/log
+touch "${LOG_FILE}"
+
+if ! command -v i2cset >/dev/null 2>&1; then
+    say "i2cset not found, skipping"
+    exit 0
+fi
+
+if [ ! -f "${CAP_FILE}" ] || [ ! -f "${VOLT_FILE}" ]; then
+    say "battery sysfs missing, skipping"
+    exit 0
+fi
+
+cap="$(read_int_file "${CAP_FILE}")"
+volt="$(read_int_file "${VOLT_FILE}")"
+[ -z "${cap}" ] && cap=0
+[ -z "${volt}" ] && volt=0
+
+# Trigger only on suspicious state:
+# - battery reports 0%
+# - but voltage is high enough to likely not be empty, or charger is connected
+if [ "${cap}" -ne 0 ]; then
+    say "capacity=${cap}% voltage_now=${volt}uV: no fix needed"
+    exit 0
+fi
+
+if [ "${volt}" -lt 3600000 ] && ! is_power_online; then
+    say "capacity=0 and low voltage (${volt}uV) with no charger: likely real empty, no fix"
+    exit 0
+fi
+
+say "detected possible stuck gauge (capacity=0 voltage_now=${volt}uV), applying i2cset"
+i2cset -f -y 0 0x20 0x57 0x51 >/dev/null 2>&1 || {
+    say "i2cset command failed"
+    exit 0
+}
+
+# Nudge power_supply userspace updates.
+udevadm trigger --subsystem-match=power_supply --action=change >/dev/null 2>&1 || true
+sleep 1
+
+new_cap="$(read_int_file "${CAP_FILE}")"
+[ -z "${new_cap}" ] && new_cap=0
+say "after fix: capacity=${new_cap}%"
+
+exit 0
+RK_BAT_GAUGE_FIX
+chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-battery-gauge-fix.sh"
+
+cat > "${ROOTFS_MNT}/etc/systemd/system/rk-battery-gauge-fix.service" << 'RK_BAT_GAUGE_FIX_UNIT'
+[Unit]
+Description=RK817 battery gauge recovery at boot
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=display-manager.service lightdm.service
+ConditionPathExists=/dev/i2c-0
+ConditionPathExists=/sys/class/power_supply/battery/capacity
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rk-battery-gauge-fix.sh
+TimeoutSec=10
+
+[Install]
+WantedBy=multi-user.target
+RK_BAT_GAUGE_FIX_UNIT
+chroot "${ROOTFS_MNT}" systemctl enable rk-battery-gauge-fix.service
 
 # 11. Offline update package auto-apply service
 echo "[*] Installing offline update auto-apply service..."
