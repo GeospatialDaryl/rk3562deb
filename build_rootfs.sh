@@ -605,6 +605,9 @@ if [ ! -f "${ROOT_DIR}/splash.png" ]; then
     exit 1
 fi
 install -m 0644 "${ROOT_DIR}/splash.png" "${THEME_DIR}/splash.png"
+mkdir -p "${ROOTFS_MNT}/usr/share/backgrounds/rkdebian"
+install -m 0644 "${ROOT_DIR}/splash.png" \
+    "${ROOTFS_MNT}/usr/share/backgrounds/rkdebian/splash.png"
 
 # Theme descriptor
 cat > "${THEME_DIR}/rkdebian.plymouth" << 'PLYMOUTH_DESC'
@@ -852,6 +855,33 @@ cat > "${ROOTFS_MNT}/home/chaos/.config/xfce4/xfconf/xfce-perchannel-xml/xsettin
 XSETTINGS_XML
 chroot "${ROOTFS_MNT}" chown chaos:chaos \
     /home/chaos/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml || true
+
+# Default XFCE wallpaper.
+cat > "${ROOTFS_MNT}/home/chaos/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" << 'XFCE4_DESKTOP_XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="single-workspace-mode" type="bool" value="true"/>
+    <property name="single-workspace-number" type="int" value="0"/>
+    <property name="screen0" type="empty">
+      <property name="monitor0" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="/usr/share/backgrounds/rkdebian/splash.png"/>
+          <property name="image-style" type="int" value="5"/>
+        </property>
+      </property>
+      <property name="monitorDSI-1" type="empty">
+        <property name="workspace0" type="empty">
+          <property name="last-image" type="string" value="/usr/share/backgrounds/rkdebian/splash.png"/>
+          <property name="image-style" type="int" value="5"/>
+        </property>
+      </property>
+    </property>
+  </property>
+</channel>
+XFCE4_DESKTOP_XML
+chroot "${ROOTFS_MNT}" chown chaos:chaos \
+    /home/chaos/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml || true
 
 # GTK3 settings file as fallback for apps that bypass xsettings.
 mkdir -p "${ROOTFS_MNT}/home/chaos/.config/gtk-3.0"
@@ -2133,7 +2163,7 @@ set -eu
 
 CFG_FILE="${HOME}/.config/rkdebian/appearance.env"
 MODE="fill"
-WALLPAPER=""
+WALLPAPER="/usr/share/backgrounds/rkdebian/splash.png"
 FALLBACK_COLOR="#1a1b26"
 
 if [ -f "${CFG_FILE}" ]; then
