@@ -86,6 +86,15 @@ setup_dirs() {
     mkdir -p "${OUTPUT_DIR}/update"
 }
 
+run_build_rootfs() {
+    local preserve_env="RKDEBIAN_FORCE_CLEAN_ROOTFS,ROOTFS_IMAGE_SIZE,ROOTFS_HEADROOM_MB,ROOTFS_MIN_MB"
+    if [ "${EUID}" -eq 0 ]; then
+        bash "${ROOT_DIR}/build_rootfs.sh"
+    else
+        sudo --preserve-env="${preserve_env}" bash "${ROOT_DIR}/build_rootfs.sh"
+    fi
+}
+
 build_uboot() {
     echo "[*] Building U-Boot..."
     cd "${SRC_DIR}"
@@ -386,7 +395,7 @@ case "${CMD}" in
         build_kernel
         ;;
     rootfs)
-        sudo bash "${ROOT_DIR}/build_rootfs.sh"
+        run_build_rootfs
         ;;
     image)
         create_image
@@ -396,7 +405,7 @@ case "${CMD}" in
         setup_dirs
         build_uboot
         build_kernel
-        sudo bash "${ROOT_DIR}/build_rootfs.sh"
+        run_build_rootfs
         create_image
         create_update_package
         ;;
