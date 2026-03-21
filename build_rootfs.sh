@@ -322,11 +322,15 @@ if compgen -G "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libmali*.so" > /dev/
 
     # Force the Mali libgbm path to resolve to Debian's libgbm implementation.
     if [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libgbm.so.1" ]; then
+        mali_gbm_backup="${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/.libgbm.so.1.rkbak"
         if [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1" ] && \
-           [ ! -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1.rkbak" ]; then
+           [ ! -e "${mali_gbm_backup}" ]; then
             cp -a "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1" \
-                  "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1.rkbak"
+                  "${mali_gbm_backup}"
         fi
+        # Drop legacy backup names that match lib*.so*; ldconfig can relink
+        # libgbm.so.1 back to them and undo the intended Debian libgbm pin.
+        rm -f "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1.rkbak"
         ln -sfn /usr/lib/aarch64-linux-gnu/libgbm.so.1 \
                 "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1"
         ln -sfn libgbm.so.1 \
@@ -832,6 +836,10 @@ Relogin=false
 [General]
 DisplayServer=${PLASMA_DISPLAY_SERVER}
 SDDM_AUTLOGIN
+
+# Stale user-unit symlinks from old sway-focused rootfs trees can trigger
+# waybar restart loops in Plasma sessions (and tank UI responsiveness).
+rm -f "${ROOTFS_MNT}/etc/systemd/user/graphical-session.target.wants/waybar.service"
 
 # Configure an on-screen keyboard at the greeter for touch-only login.
 cat > "${ROOTFS_MNT}/etc/sddm.conf.d/20-rk-virtual-keyboard.conf" << 'SDDM_VK'
