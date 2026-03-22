@@ -164,6 +164,22 @@ build_kernel() {
         fi
     fi
 
+    # RK817 hard power-off fix:
+    # force DEV_OFF over SMBus in rk817_shutdown_prepare() to avoid
+    # poweroff->immediate-reboot behavior on this tablet.
+    local rk817_dev_off_patch="${ROOT_DIR}/overlay/kernel-patches/rk817-dev-off-poweroff.patch"
+    if [ -f "${rk817_dev_off_patch}" ]; then
+        if grep -q "shutdown: SYS_CFG3=0x%02x, wrote DEV_OFF" drivers/mfd/rk808.c; then
+            echo "[*] RK817 DEV_OFF shutdown fix already present."
+        else
+            echo "[*] Applying RK817 DEV_OFF shutdown fix..."
+            if ! git apply --whitespace=nowarn "${rk817_dev_off_patch}"; then
+                echo "[-] Error: failed to apply RK817 DEV_OFF shutdown fix."
+                exit 1
+            fi
+        fi
+    fi
+
     # Use the configured defconfig, with a rockchip fallback if needed.
     if [ ! -f "arch/arm64/configs/${KERNEL_DEFCONFIG}" ]; then
         echo "Warning: ${KERNEL_DEFCONFIG} not found. Attempting rockchip_linux_defconfig..."
