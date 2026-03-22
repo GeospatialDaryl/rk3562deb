@@ -936,36 +936,13 @@ MALIIT
 chmod +x "${ROOTFS_MNT}/home/chaos/Desktop/on-screen-keyboard.desktop"
 chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/Desktop/on-screen-keyboard.desktop || true
 
-# Power key policy: on this tablet, suspend is unreliable and often appears as
-# a black/frozen screen. Make short/long press deterministic: power off.
+# Power key: short press = suspend, long press = poweroff
 mkdir -p "${ROOTFS_MNT}/etc/systemd/logind.conf.d"
 cat > "${ROOTFS_MNT}/etc/systemd/logind.conf.d/power-button.conf" << 'LOGIND'
 [Login]
-HandlePowerKey=poweroff
+HandlePowerKey=suspend
 HandlePowerKeyLongPress=poweroff
 LOGIND
-
-# KDE PowerDevil can override logind power-key handling in user sessions.
-# Force the profile defaults (and chaos user seed) to direct shutdown.
-mkdir -p "${ROOTFS_MNT}/etc/xdg"
-cat > "${ROOTFS_MNT}/etc/xdg/powermanagementprofilesrc" << 'POWERDEVIL_BUTTONS'
-[AC][HandleButtonEvents]
-powerButtonAction=8
-powerDownAction=8
-
-[Battery][HandleButtonEvents]
-powerButtonAction=8
-powerDownAction=8
-
-[LowBattery][HandleButtonEvents]
-powerButtonAction=8
-powerDownAction=8
-POWERDEVIL_BUTTONS
-
-mkdir -p "${ROOTFS_MNT}/home/chaos/.config"
-cp -f "${ROOTFS_MNT}/etc/xdg/powermanagementprofilesrc" \
-      "${ROOTFS_MNT}/home/chaos/.config/powermanagementprofilesrc"
-chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/.config/powermanagementprofilesrc || true
 
 echo "[*] Adding polkit rule for backlight control..."
 mkdir -p "${ROOTFS_MNT}/etc/polkit-1/rules.d"
