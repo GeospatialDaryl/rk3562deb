@@ -334,10 +334,13 @@ fi
     fi
 fi
 
-# 5b. Keep Mesa EGL fallback, and make Mali GBM path use Debian libgbm.
+# 5b. Keep Mesa GBM fallback, and make Mali GBM path use Debian libgbm.
 # Some Mali blobs ship an old libgbm missing gbm_bo_create_with_modifiers2,
-# which causes Plasma Wayland login loops.
-if compgen -G "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libmali*.so" > /dev/null; then
+# which causes KWin/Plasma startup failures.
+if compgen -G "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libmali*.so" > /dev/null || \
+   [ -e "${ROOTFS_MNT}/lib/aarch64-linux-gnu/libmali.so.1" ] || \
+   [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libmali.so.1" ] || \
+   [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1" ]; then
     echo "[*] Preserving Mesa EGL fallback and fixing Mali libgbm path..."
 
     # Force the Mali libgbm path to resolve to Debian's libgbm implementation.
@@ -956,6 +959,16 @@ Categories=Utility;
 MALIIT
 chmod +x "${ROOTFS_MNT}/home/chaos/Desktop/on-screen-keyboard.desktop"
 chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/Desktop/on-screen-keyboard.desktop || true
+
+# Ensure user-level Plasma config/cache dirs are writable by the session user.
+# Some build-time mkdir operations run as root and can otherwise leave these
+# directories owned by root, which breaks Plasma startup.
+mkdir -p "${ROOTFS_MNT}/home/chaos/.local" "${ROOTFS_MNT}/home/chaos/.cache"
+chroot "${ROOTFS_MNT}" chown -R chaos:chaos \
+    /home/chaos/.config \
+    /home/chaos/.local \
+    /home/chaos/.cache \
+    /home/chaos/Desktop || true
 
 # Power key: short press = suspend, long press = poweroff
 mkdir -p "${ROOTFS_MNT}/etc/systemd/logind.conf.d"
