@@ -1693,13 +1693,13 @@ X-GNOME-Autostart-enabled=true
 NoDisplay=true
 RK_AUDIO_SESSION_DESKTOP
 
-# 10. USB OTG service
-if [ -f "${ROOT_DIR}/overlay/usb-mode-switch.sh" ] && [ -f "${ROOT_DIR}/overlay/usb-otg-host.service" ]; then
-    echo "[*] Installing USB OTG service..."
-    cp "${ROOT_DIR}/overlay/usb-mode-switch.sh" "${ROOTFS_MNT}/usr/local/bin/usb-mode-switch.sh"
-    chmod +x "${ROOTFS_MNT}/usr/local/bin/usb-mode-switch.sh"
-    cp "${ROOT_DIR}/overlay/usb-otg-host.service" "${ROOTFS_MNT}/etc/systemd/system/usb-otg-host.service"
-    chroot "${ROOTFS_MNT}" systemctl enable usb-otg-host.service
+# 10. USB OTG host fix service
+if [ -f "${ROOT_DIR}/overlay/usb-force-host.sh" ] && [ -f "${ROOT_DIR}/overlay/usb-force-host.service" ]; then
+    echo "[*] Installing USB OTG host fix service..."
+    cp "${ROOT_DIR}/overlay/usb-force-host.sh" "${ROOTFS_MNT}/usr/local/bin/usb-force-host.sh"
+    chmod +x "${ROOTFS_MNT}/usr/local/bin/usb-force-host.sh"
+    cp "${ROOT_DIR}/overlay/usb-force-host.service" "${ROOTFS_MNT}/etc/systemd/system/usb-force-host.service"
+    chroot "${ROOTFS_MNT}" systemctl enable usb-force-host.service
 fi
 
 # 10b. (removed) rk817-hard-poweroff userspace service was removed.
