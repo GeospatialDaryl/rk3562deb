@@ -283,31 +283,51 @@ if [ -d "${ROOT_DIR}/debs" ]; then
     if compgen -G "${ROOT_DIR}/debs/*.deb" > /dev/null; then
         mkdir -p "${ROOTFS_MNT}/tmp/debs"
         cp "${ROOT_DIR}/debs"/*.deb "${ROOTFS_MNT}/tmp/debs/"
-        chroot "${ROOTFS_MNT}" bash -c '
+        if ! chroot "${ROOTFS_MNT}" bash -c '
 set -e
-dpkg -i /tmp/debs/*.deb || apt-get -f install -y
 
-# Prefer a Wayland-capable Mali userspace package when one is provided locally.
-wayland_mali_deb=""
-for candidate in /tmp/debs/libmali*-x11-wayland-gbm*.deb /tmp/debs/libmali*-wayland-gbm*.deb; do
+# Install non-Mali local packages first.
+non_mali_debs="$(find /tmp/debs -maxdepth 1 -type f -name "*.deb" ! -name "libmali*.deb" -print)"
+if [ -n "${non_mali_debs}" ]; then
+    dpkg -i ${non_mali_debs} || apt-get -f install -y
+fi
+
+# Select Mali package priority for current known-good Plasma X11 colors path:
+# g13 x11-gbm -> generic x11-gbm -> x11-wayland-gbm -> wayland-gbm -> any.
+selected_mali_deb=""
+for candidate in \
+    /tmp/debs/libmali*-g13p0*x11-gbm*.deb \
+    /tmp/debs/libmali*-x11-gbm*.deb \
+    /tmp/debs/libmali*-x11-wayland-gbm*.deb \
+    /tmp/debs/libmali*-wayland-gbm*.deb \
+    /tmp/debs/libmali*.deb; do
     [ -e "${candidate}" ] || continue
-    wayland_mali_deb="${candidate}"
+    selected_mali_deb="${candidate}"
     break
 done
-if [ -n "${wayland_mali_deb}" ]; then
-    dpkg -i "${wayland_mali_deb}" || apt-get -f install -y
-fi
 
-# If both variants exist, drop x11-only Mali to avoid selecting the wrong EGL stack.
-mali_pkgs="$(dpkg -l | awk '"'"'/^ii/ && $2 ~ /^libmali-/ {print $2}'"'"')"
-if echo "${mali_pkgs}" | grep -Eq "(x11-wayland-gbm|wayland-gbm)$"; then
-    x11_only_pkgs="$(echo "${mali_pkgs}" | grep -E "x11-gbm$" | grep -v "x11-wayland-gbm" || true)"
-    if [ -n "${x11_only_pkgs}" ]; then
-        apt-get purge -y ${x11_only_pkgs} || true
-        apt-get -f install -y || true
+if [ -n "${selected_mali_deb}" ]; then
+    selected_mali_pkg="$(dpkg-deb -f "${selected_mali_deb}" Package)"
+
+    # Ensure only the selected libmali family remains installed.
+    existing_mali_pkgs="$(dpkg -l | awk '"'"'/^ii/ && $2 ~ /^libmali-/ {print $2}'"'"')"
+    if [ -n "${existing_mali_pkgs}" ]; then
+        apt-get purge -y ${existing_mali_pkgs}
+        apt-get -f install -y
+    fi
+
+    dpkg -i "${selected_mali_deb}" || apt-get -f install -y
+    if ! dpkg -s "${selected_mali_pkg}" 2>/dev/null | grep -q "^Status: install ok installed$"; then
+        echo "[-] Error: failed to install expected Mali package: ${selected_mali_pkg}"
+        dpkg -l | awk '"'"'/^ii/ && $2 ~ /^libmali-/ {print $2, $3}'"'"' || true
+        exit 1
     fi
 fi
-' 2>/dev/null || true
+        '; then
+            echo "[-] Error: failed to install local GPU/MPP packages in chroot."
+            rm -rf "${ROOTFS_MNT}/tmp/debs"
+            exit 1
+        fi
         rm -rf "${ROOTFS_MNT}/tmp/debs"
     else
         echo "[!] Warning: No .deb files found in ${ROOT_DIR}/debs"
@@ -478,10 +498,12 @@ cat > "${ROOTFS_MNT}/etc/X11/xorg.conf.d/20-modesetting-rockchip.conf" << 'XORG_
 Section "Device"
     Identifier "Rockchip Graphics"
     Driver "modesetting"
-    # Keep X11 on the non-glamor path for stability with this Mali userspace.
-    # We observed intermittent SDDM black-screen boots where Xorg crashed in
-    # libmali while modesetting+glamor initialized eglGetDisplay().
-    Option "AccelMethod" "none"
+    # glamor is enabled for 2D acceleration.
+    # NOTE: xrandr --rotate crashes the X server with the Mali BSP blob because
+    # glamor's shadow-framebuffer rotation path is incompatible with this driver.
+    # Screen rotation on X11 is intentionally disabled in the tray app; use a
+    # Wayland session for smooth, crash-free rotation instead.
+    Option "AccelMethod" "glamor"
     Option "DRI" "3"
 EndSection
 XORG_GPU
@@ -897,7 +919,6 @@ rk-xfce4-panel.desktop
 xfce4-notifyd.desktop
 xfce4-power-manager.desktop
 xfsettingsd.desktop
-xiccd.desktop
 "
 
 for desktop in ${PLASMA_DISABLE_AUTOSTARTS}; do
