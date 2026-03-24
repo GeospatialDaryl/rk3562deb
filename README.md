@@ -122,6 +122,7 @@ These variables can be set before running `build.sh` to control build behaviour:
 | `ROOTFS_IMAGE_SIZE` | `auto` | Override the rootfs partition size (e.g. `4G`, `3584M`). By default the size is calculated automatically from actual rootfs usage plus headroom. |
 | `ROOTFS_HEADROOM_MB` | `512` | Free space headroom added on top of actual rootfs usage when using `auto` sizing. |
 | `ROOTFS_MIN_MB` | `2560` | Minimum rootfs image size in MiB when using `auto` sizing. |
+| `RKDEBIAN_DISPLAY_SERVER` | `x11` | Desktop session backend for Plasma images. `x11` is the safe default on this tablet, `wayland` is still available for testing, `auto` picks the best installed session. |
 
 ### Kernel
 
@@ -149,6 +150,9 @@ RKDEBIAN_FORCE_CLEAN_ROOTFS=1 ./build.sh rootfs
 
 # Keep overlay PMIC patches during kernel build
 RKDEBIAN_KEEP_OVERLAY_PMIC_PATCHES=1 ./build.sh extboot
+
+# Force a Wayland desktop image for testing
+RKDEBIAN_DISPLAY_SERVER=wayland ./build.sh all
 ```
 
 ---

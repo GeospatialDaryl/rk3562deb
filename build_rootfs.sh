@@ -14,6 +14,15 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OUT_DIR="${ROOT_DIR}/out"
 ROOTFS_MNT="${OUT_DIR}/rootfs"
 MODULES_DIR="${OUT_DIR}/modules_staging/lib/modules"
+RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-x11}"
+
+case "${RKDEBIAN_DISPLAY_SERVER}" in
+    auto|wayland|x11) ;;
+    *)
+        echo "[-] Unsupported RKDEBIAN_DISPLAY_SERVER=${RKDEBIAN_DISPLAY_SERVER} (expected auto, wayland, or x11)."
+        exit 1
+        ;;
+esac
 
 echo "[*] Building Debian 12 Bookworm arm64 rootfs..."
 
@@ -195,7 +204,8 @@ systemctl enable packagekit || true
 
 # Enable compressed RAM swap to improve responsiveness on 4GB systems.
 cat > /etc/default/zramswap << 'ZRAMCFG'
-ALGO=lz4
+# RK3562 kernel currently supports: lzo, lzo-rle, zstd
+ALGO=lzo-rle
 PERCENT=50
 PRIORITY=100
 ZRAMCFG
@@ -827,27 +837,52 @@ rm -f "${ROOTFS_MNT}/home/chaos/.config/environment.d/90-plasma-x11.conf" \
       "${ROOTFS_MNT}/home/chaos/.config/plasma-org.kde.plasma.desktop-appletsrc" \
       "${ROOTFS_MNT}/home/chaos/.config/plasmashellrc"
 
-# Prefer Plasma X11 by default.
-PLASMA_SESSION="plasma.desktop"
-PLASMA_DISPLAY_SERVER="x11"
-if [ ! -f "${ROOTFS_MNT}/usr/share/xsessions/${PLASMA_SESSION}" ]; then
-    echo "[!] Warning: ${PLASMA_SESSION} missing in /usr/share/xsessions; scanning fallback sessions."
-    PLASMA_SESSION=""
-    for candidate in plasma.desktop plasma-mobile.desktop plasmawayland.desktop; do
-        if [ -f "${ROOTFS_MNT}/usr/share/xsessions/${candidate}" ] || \
-           [ -f "${ROOTFS_MNT}/usr/share/wayland-sessions/${candidate}" ]; then
-            PLASMA_SESSION="${candidate}"
-            break
-        fi
-    done
-    if [ -z "${PLASMA_SESSION}" ]; then
-        PLASMA_SESSION="plasma.desktop"
-        echo "[!] Warning: no Plasma session desktop file detected; defaulting to ${PLASMA_SESSION}."
-    fi
-    if [ ! -f "${ROOTFS_MNT}/usr/share/xsessions/${PLASMA_SESSION}" ]; then
-        PLASMA_DISPLAY_SERVER="wayland"
-        echo "[!] Warning: ${PLASMA_SESSION} is not an X11 session; using DisplayServer=${PLASMA_DISPLAY_SERVER}."
-    fi
+find_plasma_session() {
+    local requested="$1"
+    case "${requested}" in
+        wayland)
+            for candidate in plasmawayland.desktop plasma-mobile.desktop; do
+                if [ -f "${ROOTFS_MNT}/usr/share/wayland-sessions/${candidate}" ]; then
+                    printf 'wayland:%s\n' "${candidate}"
+                    return 0
+                fi
+            done
+            ;;
+        x11)
+            if [ -f "${ROOTFS_MNT}/usr/share/xsessions/plasma.desktop" ]; then
+                printf 'x11:%s\n' "plasma.desktop"
+                return 0
+            fi
+            ;;
+        auto)
+            if [ -f "${ROOTFS_MNT}/usr/share/xsessions/plasma.desktop" ]; then
+                printf 'x11:%s\n' "plasma.desktop"
+                return 0
+            fi
+            for candidate in plasmawayland.desktop plasma-mobile.desktop; do
+                if [ -f "${ROOTFS_MNT}/usr/share/wayland-sessions/${candidate}" ]; then
+                    printf 'wayland:%s\n' "${candidate}"
+                    return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+PLASMA_SESSION_INFO="$(find_plasma_session "${RKDEBIAN_DISPLAY_SERVER}" || true)"
+if [ -z "${PLASMA_SESSION_INFO}" ] && [ "${RKDEBIAN_DISPLAY_SERVER}" != "auto" ]; then
+    echo "[!] Warning: requested ${RKDEBIAN_DISPLAY_SERVER} Plasma session not found; falling back to auto."
+    PLASMA_SESSION_INFO="$(find_plasma_session auto || true)"
+fi
+
+if [ -n "${PLASMA_SESSION_INFO}" ]; then
+    PLASMA_DISPLAY_SERVER="${PLASMA_SESSION_INFO%%:*}"
+    PLASMA_SESSION="${PLASMA_SESSION_INFO#*:}"
+else
+    PLASMA_DISPLAY_SERVER="x11"
+    PLASMA_SESSION="plasma.desktop"
+    echo "[!] Warning: no Plasma session desktop file detected; defaulting to ${PLASMA_SESSION}."
 fi
 
 cat > "${ROOTFS_MNT}/etc/sddm.conf.d/10-rk-autologin.conf" << SDDM_AUTLOGIN
@@ -900,22 +935,29 @@ cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/onboard.desktop" << 'ONBOARD_H
 [Desktop Entry]
 Hidden=true
 ONBOARD_HIDE
+cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/onboard-autostart.desktop" << 'ONBOARD_AUTOSTART_HIDE'
+[Desktop Entry]
+Hidden=true
+ONBOARD_AUTOSTART_HIDE
 cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/maliit-keyboard.desktop" << 'MALIIT_KEYBOARD_HIDE'
 [Desktop Entry]
 Hidden=true
 MALIIT_KEYBOARD_HIDE
-chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/.config/autostart/onboard.desktop \
+chroot "${ROOTFS_MNT}" chown chaos:chaos \
+    /home/chaos/.config/autostart/onboard.desktop \
+    /home/chaos/.config/autostart/onboard-autostart.desktop \
     /home/chaos/.config/autostart/maliit-keyboard.desktop || true
 
 # Trim background autostarts that are unnecessary in the Plasma tablet image.
 # These either belong to other desktops (XFCE/GNOME) or are optional daemons
-# that cost responsiveness on software-rendered Plasma X11.
+# that cost responsiveness on this tablet.
 PLASMA_DISABLE_AUTOSTARTS="
 ayatana-indicator-application.desktop
 blueman.desktop
 geoclue-demo-agent.desktop
 kup-daemon.desktop
 light-locker.desktop
+org.kde.discover.notifier.desktop
 org.gnome.Software.desktop
 print-applet.desktop
 rk-xfce4-panel.desktop

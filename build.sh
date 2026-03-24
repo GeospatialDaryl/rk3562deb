@@ -87,7 +87,7 @@ setup_dirs() {
 }
 
 run_build_rootfs() {
-    local preserve_env="RKDEBIAN_FORCE_CLEAN_ROOTFS,ROOTFS_IMAGE_SIZE,ROOTFS_HEADROOM_MB,ROOTFS_MIN_MB"
+    local preserve_env="RKDEBIAN_FORCE_CLEAN_ROOTFS,ROOTFS_IMAGE_SIZE,ROOTFS_HEADROOM_MB,ROOTFS_MIN_MB,RKDEBIAN_DISPLAY_SERVER"
     if [ "${EUID}" -eq 0 ]; then
         bash "${ROOT_DIR}/build_rootfs.sh"
     else
