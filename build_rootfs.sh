@@ -15,11 +15,20 @@ OUT_DIR="${ROOT_DIR}/out"
 ROOTFS_MNT="${OUT_DIR}/rootfs"
 MODULES_DIR="${OUT_DIR}/modules_staging/lib/modules"
 RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-x11}"
+RKDEBIAN_CPU_GOVERNOR="${RKDEBIAN_CPU_GOVERNOR:-performance}"
 
 case "${RKDEBIAN_DISPLAY_SERVER}" in
     auto|wayland|x11) ;;
     *)
         echo "[-] Unsupported RKDEBIAN_DISPLAY_SERVER=${RKDEBIAN_DISPLAY_SERVER} (expected auto, wayland, or x11)."
+        exit 1
+        ;;
+esac
+
+case "${RKDEBIAN_CPU_GOVERNOR}" in
+    performance|schedutil|ondemand|powersave|conservative|userspace) ;;
+    *)
+        echo "[-] Unsupported RKDEBIAN_CPU_GOVERNOR=${RKDEBIAN_CPU_GOVERNOR}."
         exit 1
         ;;
 esac
@@ -828,6 +837,14 @@ FSTAB
 echo "[*] Configuring SDDM autologin..."
 mkdir -p "${ROOTFS_MNT}/etc/sddm.conf.d"
 rm -rf "${ROOTFS_MNT}/etc/lightdm"
+# Reused rootfs trees can retain a text-mode default target from prior
+# experiments or recovery boots. Force graphical boot so SDDM is started.
+ln -sf /lib/systemd/system/graphical.target "${ROOTFS_MNT}/etc/systemd/system/default.target"
+# Drop stale gaming-session services from reused rootfs trees; they can keep
+# waking up in the background even on desktop-oriented images.
+rm -f "${ROOTFS_MNT}/etc/systemd/system/emulationstation.service" \
+      "${ROOTFS_MNT}/etc/systemd/system/multi-user.target.wants/emulationstation.service" \
+      "${ROOTFS_MNT}/usr/local/bin/rk-start-emulationstation.sh"
 
 # Drop stale per-user overrides from previous experiments that can force a
 # mismatched session backend and cause black-screen/login-loop behavior.
@@ -1767,30 +1784,31 @@ fi
 
 # 10c. Power tuning service (WiFi power-save, CPU governor)
 echo "[*] Installing power tuning service..."
-cat > "${ROOTFS_MNT}/usr/local/sbin/rk-power-tune.sh" << 'RK_POWER_TUNE'
+cat > "${ROOTFS_MNT}/usr/local/sbin/rk-power-tune.sh" << RK_POWER_TUNE
 #!/bin/sh
 # RK3562 tablet power tuning — runs once at boot after network is up.
+CPU_GOVERNOR="${RKDEBIAN_CPU_GOVERNOR}"
 
 # Enable WiFi power save if interface exists
 for iface in wlan0 wlan1; do
-    if ip link show "$iface" > /dev/null 2>&1; then
-        iw dev "$iface" set power_save on 2>/dev/null || true
+    if ip link show "\$iface" > /dev/null 2>&1; then
+        iw dev "\$iface" set power_save on 2>/dev/null || true
     fi
 done
 
-# Switch all CPU policies to schedutil if currently set to performance
+# Keep the CPU governor biased toward UI responsiveness on this tablet.
 for policy in /sys/devices/system/cpu/cpufreq/policy*; do
-    [ -f "$policy/scaling_governor" ] || continue
-    echo schedutil > "$policy/scaling_governor" 2>/dev/null || true
+    [ -f "\$policy/scaling_governor" ] || continue
+    echo "\$CPU_GOVERNOR" > "\$policy/scaling_governor" 2>/dev/null || true
 done
 RK_POWER_TUNE
 chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-power-tune.sh"
 
 cat > "${ROOTFS_MNT}/etc/systemd/system/rk-power-tune.service" << 'RK_POWER_TUNE_UNIT'
 [Unit]
-Description=RK3562 power tuning (WiFi power-save, CPU governor)
-After=network.target
-Wants=network.target
+Description=RK3562 power tuning (responsive CPU governor, WiFi power-save)
+After=local-fs.target
+Before=display-manager.service
 
 [Service]
 Type=oneshot
