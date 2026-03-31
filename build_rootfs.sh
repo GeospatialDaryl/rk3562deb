@@ -14,10 +14,10 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OUT_DIR="${ROOT_DIR}/out"
 ROOTFS_MNT="${OUT_DIR}/rootfs"
 MODULES_DIR="${OUT_DIR}/modules_staging/lib/modules"
-RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-x11}"
+RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-wayland}"
 RKDEBIAN_CPU_GOVERNOR="${RKDEBIAN_CPU_GOVERNOR:-performance}"
 RKDEBIAN_GPU_STACK="${RKDEBIAN_GPU_STACK:-mali}"
-RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION:-plasma}"
+RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION:-phosh}"
 
 case "${RKDEBIAN_DISPLAY_SERVER}" in
     auto|wayland|x11) ;;
@@ -44,9 +44,9 @@ case "${RKDEBIAN_GPU_STACK}" in
 esac
 
 case "${RKDEBIAN_UI_SESSION}" in
-    plasma|lomiri) ;;
+    phosh) ;;
     *)
-        echo "[-] Unsupported RKDEBIAN_UI_SESSION=${RKDEBIAN_UI_SESSION} (expected plasma or lomiri)."
+        echo "[-] Unsupported RKDEBIAN_UI_SESSION=${RKDEBIAN_UI_SESSION} (expected phosh)."
         exit 1
         ;;
 esac
@@ -146,11 +146,11 @@ apt-get update
 apt-get install -y sudo curl wget nano vim openssh-server network-manager wpasupplicant iw wireless-tools \
     network-manager-gnome bluez blueman policykit-1-gnome \
     xorg xserver-xorg xserver-xorg-input-libinput firefox-esr mesa-utils libgl1-mesa-dri mesa-vulkan-drivers \
-    pulseaudio pulseaudio-utils pulseaudio-module-bluetooth pavucontrol alsa-utils libasound2-plugins \
+    pipewire pipewire-audio pipewire-alsa pipewire-pulse wireplumber pavucontrol alsa-utils libasound2-plugins \
     zram-tools \
     plymouth plymouth-themes \
     libegl1 libgles2 libgbm1 libva2 libva-drm2 ffmpeg dbus \
-    udev evtest sddm pciutils usbutils \
+    udev evtest pciutils usbutils \
     xinput libinput-tools \
     python3 python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
     qt6-wayland \
@@ -168,47 +168,25 @@ rm -f "${ROOTFS_MNT}/etc/apt/sources.list.d/trixie.list"
 rm -f "${ROOTFS_MNT}/etc/apt/preferences.d/99-trixie-pin"
 apt-get update -qq
 
-# Plasma Wayland stack.
-# Prefer Plasma Mobile where available; fall back to Plasma Desktop.
-apt-get install -y plasma-workspace-wayland kwin-wayland
-
-plasma_shell_installed=0
-for session_pkg in plasma-mobile plasma-phone-components plasma-desktop; do
-    if apt-cache show "${session_pkg}" >/dev/null 2>&1; then
-        apt-get install -y "${session_pkg}"
-        plasma_shell_installed=1
-        [ "${session_pkg}" != "plasma-mobile" ] && \
-            echo "[!] Warning: ${session_pkg} installed (plasma-mobile unavailable on this mirror)."
-        break
-    fi
-done
-if [ "${plasma_shell_installed}" -ne 1 ]; then
-    echo "[-] Error: no Plasma shell package available (tried plasma-mobile/plasma-phone-components/plasma-desktop)."
-    exit 1
+# Remove stale desktop shells from reused rootfs trees so a non-clean build
+# still converges to the Phosh profile.
+stale_session_pkgs="$(
+    dpkg-query -W -f='${Package}\n' | \
+        grep -E '^(lomiri(|-.*)|mir-platform-graphics-.*|mir-graphics-drivers-desktop|plasma-.*|kwin-wayland|sddm(|-.*)|kde-plasma-desktop)$' || true
+)"
+if [ -n "${stale_session_pkgs}" ]; then
+    echo "[*] Purging stale desktop/session packages: ${stale_session_pkgs//$'\n'/ }"
+    apt-get purge -y ${stale_session_pkgs}
+    apt-get autoremove -y --purge
 fi
 
-if [ "${RKDEBIAN_UI_SESSION:-plasma}" = "lomiri" ]; then
-    echo "[*] Installing Lomiri desktop session packages..."
-    apt-get install -y lomiri lomiri-desktop-session
-    # Install Mir platform backends recommended by lomiri on Debian.
-    apt-get install -y mir-platform-graphics-gbm-kms mir-platform-graphics-wayland \
-        mir-platform-graphics-x mir-graphics-drivers-desktop || true
-    # Lomiri requires LightDM (SDDM cannot launch Wayland/Mir sessions reliably).
-    apt-get install -y lightdm lightdm-gtk-greeter
-    # Remove morph-browser — crashes on Mali due to libQt5SystemInfo X11 calls.
-    apt-get remove -y morph-browser 2>/dev/null || true
-fi
+echo "[*] Installing Phosh session packages..."
+apt-get install -y lightdm lightdm-gtk-greeter \
+    phosh phoc phosh-mobile-settings phosh-mobile-tweaks phosh-plugins \
+    squeekboard wlr-randr grim xwayland iio-sensor-proxy
 
-# Optional Plasma/Mobile helpers.
-# Include Qt virtual keyboard packages so SDDM can show an on-screen keyboard
-# before login on touch-only devices.
-for optional_pkg in plasma-nm plasma-pa plasma-discover plasma-discover-backend-flatpak \
-                    xdg-desktop-portal-kde maliit-framework maliit-keyboard \
-                    maliit-inputcontext-qt5 maliit-inputcontext-qt6 \
-                    maliit-inputcontext-gtk3 maliit-inputcontext-gtk2 \
-                    qtvirtualkeyboard-plugin \
-                    qml-module-qtquick-virtualkeyboard \
-                    qml6-module-qtquick-virtualkeyboard xwayland iio-sensor-proxy; do
+# Optional helpers for sandboxed apps and touch/desktop integration.
+for optional_pkg in xdg-desktop-portal-gtk xdg-desktop-portal-gnome; do
     # Check exact Bookworm version to avoid accidentally pulling Trixie builds
     # that sneak in via a dirty apt cache.
     pkg_ver=$(apt-cache policy "${optional_pkg}" 2>/dev/null \
@@ -221,16 +199,11 @@ for optional_pkg in plasma-nm plasma-pa plasma-discover plasma-discover-backend-
     fi
 done
 
-# App store: Discover + Flatpak backend + Flathub remote.
+# App store source: Flathub remote for Flatpak.
 if command -v flatpak >/dev/null 2>&1; then
     flatpak remote-add --if-not-exists flathub \
         https://flathub.org/repo/flathub.flatpakrepo || \
         echo "[!] Warning: failed to add Flathub remote."
-fi
-if apt-cache show plasma-discover-backend-flatpak >/dev/null 2>&1; then
-    apt-get install -y plasma-discover-backend-flatpak
-else
-    echo "[!] Warning: plasma-discover-backend-flatpak not available; Flatpak apps won't show in Discover."
 fi
 
 # Chromium is often smoother than Firefox on this board for YouTube playback.
@@ -283,14 +256,10 @@ echo "root:root" | chpasswd
 systemctl enable NetworkManager
 systemctl enable bluetooth
 systemctl enable upower || true
-# Select display manager: LightDM for Lomiri, SDDM for Plasma.
+# Select display manager: LightDM for Phosh.
 rm -f /etc/systemd/system/display-manager.service
-if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ]; then
-    systemctl disable sddm 2>/dev/null || true
-    systemctl enable lightdm
-else
-    systemctl enable sddm
-fi
+systemctl disable sddm 2>/dev/null || true
+systemctl enable lightdm
 systemctl enable packagekit || true
 
 # Enable compressed RAM swap to improve responsiveness on 4GB systems.
@@ -351,11 +320,10 @@ fi
 chroot "${ROOTFS_MNT}" env RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION}" QEMU_RESERVED_VA=0x4000000000 /bin/bash /tmp/setup_debian.sh
 rm "${ROOTFS_MNT}/tmp/setup_debian.sh"
 
-# Do not silently continue with Plasma when a Lomiri image was requested.
-if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ] && \
-   [ ! -f "${ROOTFS_MNT}/usr/share/wayland-sessions/lomiri.desktop" ]; then
-    echo "[-] Error: RKDEBIAN_UI_SESSION=lomiri requested, but lomiri.desktop is missing in rootfs."
-    echo "    Aborting image build to avoid shipping a wrong (Plasma) session."
+# Do not silently continue when the requested Phosh session is missing.
+if [ ! -f "${ROOTFS_MNT}/usr/share/wayland-sessions/phosh.desktop" ]; then
+    echo "[-] Error: RKDEBIAN_UI_SESSION=phosh requested, but phosh.desktop is missing in rootfs."
+    echo "    Aborting image build to avoid shipping a wrong session profile."
     exit 1
 fi
 
@@ -409,34 +377,18 @@ if [ "${RKDEBIAN_GPU_STACK:-mali}" = "panfrost" ]; then
         apt-get -f install -y
     fi
 else
-    # Select Mali package priority based on UI session.
-    # Lomiri runs on Mir/Wayland, so prefer wayland-gbm blobs.
-    # Plasma (X11) prefers x11-gbm for correct color rendering.
+    # Phosh is Wayland-first: prefer wayland-gbm blobs.
+    # Keep x11-wayland/x11 variants as fallback when wayland-gbm is unavailable.
     selected_mali_deb=""
-    if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ]; then
-      # Lomiri: wayland-gbm -> x11-wayland-gbm -> any.
-      for candidate in \
-          /tmp/debs/libmali*-wayland-gbm*.deb \
-          /tmp/debs/libmali*-x11-wayland-gbm*.deb \
-          /tmp/debs/libmali*.deb; do
-        [ -e "${candidate}" ] || continue
-        selected_mali_deb="${candidate}"
-        break
-      done
-    fi
-    if [ -z "${selected_mali_deb}" ]; then
-    # Plasma / fallback: g13 x11-gbm -> generic x11-gbm -> x11-wayland-gbm -> wayland-gbm -> any.
     for candidate in \
-        /tmp/debs/libmali*-g13p0*x11-gbm*.deb \
-        /tmp/debs/libmali*-x11-gbm*.deb \
-        /tmp/debs/libmali*-x11-wayland-gbm*.deb \
         /tmp/debs/libmali*-wayland-gbm*.deb \
+        /tmp/debs/libmali*-x11-wayland-gbm*.deb \
+        /tmp/debs/libmali*-x11-gbm*.deb \
         /tmp/debs/libmali*.deb; do
         [ -e "${candidate}" ] || continue
         selected_mali_deb="${candidate}"
         break
     done
-    fi
 
     if [ -n "${selected_mali_deb}" ]; then
         selected_mali_pkg="$(dpkg-deb -f "${selected_mali_deb}" Package)"
@@ -480,7 +432,7 @@ if [ "${RKDEBIAN_GPU_STACK}" = "panfrost" ]; then
 else
     # Keep Mesa GBM fallback, and make Mali GBM path use Debian libgbm.
     # Some Mali blobs ship an old libgbm missing gbm_bo_create_with_modifiers2,
-    # which causes KWin/Plasma startup failures.
+    # which causes Wayland compositor startup failures.
     if compgen -G "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libmali*.so" > /dev/null || \
        [ -e "${ROOTFS_MNT}/lib/aarch64-linux-gnu/libmali.so.1" ] || \
        [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libmali.so.1" ] || \
@@ -971,12 +923,10 @@ FSTAB
 
 # 9. Configure display manager autologin
 echo "[*] Configuring display manager autologin (${RKDEBIAN_UI_SESSION})..."
-mkdir -p "${ROOTFS_MNT}/etc/sddm.conf.d"
-if [ "${RKDEBIAN_UI_SESSION}" != "lomiri" ]; then
-    rm -rf "${ROOTFS_MNT}/etc/lightdm"
-fi
+rm -rf "${ROOTFS_MNT}/etc/sddm.conf.d"
+mkdir -p "${ROOTFS_MNT}/etc/lightdm"
 # Reused rootfs trees can retain a text-mode default target from prior
-# experiments or recovery boots. Force graphical boot so SDDM is started.
+# experiments or recovery boots. Force graphical boot so LightDM is started.
 ln -sf /lib/systemd/system/graphical.target "${ROOTFS_MNT}/etc/systemd/system/default.target"
 # Drop stale gaming-session services from reused rootfs trees; they can keep
 # waking up in the background even on desktop-oriented images.
@@ -991,254 +941,242 @@ rm -f "${ROOTFS_MNT}/home/chaos/.config/environment.d/90-plasma-x11.conf" \
       "${ROOTFS_MNT}/home/chaos/.config/plasma-org.kde.plasma.phoneshell-appletsrc" \
       "${ROOTFS_MNT}/home/chaos/.config/plasma-org.kde.plasma.desktop-appletsrc" \
       "${ROOTFS_MNT}/home/chaos/.config/plasmashellrc"
+rm -rf "${ROOTFS_MNT}/home/chaos/.cache/lomiri" \
+       "${ROOTFS_MNT}/home/chaos/.config/lomiri" \
+       "${ROOTFS_MNT}/home/chaos/.local/share/lomiri"
 
-find_plasma_session() {
-    local requested="$1"
-    case "${requested}" in
-        wayland)
-            for candidate in plasmawayland.desktop plasma-mobile.desktop; do
-                if [ -f "${ROOTFS_MNT}/usr/share/wayland-sessions/${candidate}" ]; then
-                    printf 'wayland:%s\n' "${candidate}"
-                    return 0
-                fi
-            done
-            ;;
-        x11)
-            if [ -f "${ROOTFS_MNT}/usr/share/xsessions/plasma.desktop" ]; then
-                printf 'x11:%s\n' "plasma.desktop"
-                return 0
-            fi
-            ;;
-        auto)
-            if [ -f "${ROOTFS_MNT}/usr/share/xsessions/plasma.desktop" ]; then
-                printf 'x11:%s\n' "plasma.desktop"
-                return 0
-            fi
-            for candidate in plasmawayland.desktop plasma-mobile.desktop; do
-                if [ -f "${ROOTFS_MNT}/usr/share/wayland-sessions/${candidate}" ]; then
-                    printf 'wayland:%s\n' "${candidate}"
-                    return 0
-                fi
-            done
-            ;;
-    esac
-    return 1
-}
+# Remove stale KDE LightDM defaults that can override autologin-session.
+rm -f "${ROOTFS_MNT}/usr/share/lightdm/lightdm.conf.d/40-kde-plasma-kf5.conf"
 
-SDDM_SESSION=""
-SDDM_DISPLAY_SERVER="x11"
-if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ]; then
-    if [ -f "${ROOTFS_MNT}/usr/share/wayland-sessions/lomiri.desktop" ]; then
-        SDDM_SESSION="lomiri.desktop"
-    else
-        echo "[-] Error: RKDEBIAN_UI_SESSION=lomiri requested but lomiri.desktop is missing."
-        echo "    Refusing to fall back to Plasma for this build."
-        exit 1
-    fi
-fi
-
-if [ -z "${SDDM_SESSION}" ]; then
-    PLASMA_SESSION_INFO="$(find_plasma_session "${RKDEBIAN_DISPLAY_SERVER}" || true)"
-    if [ -z "${PLASMA_SESSION_INFO}" ] && [ "${RKDEBIAN_DISPLAY_SERVER}" != "auto" ]; then
-        echo "[!] Warning: requested ${RKDEBIAN_DISPLAY_SERVER} Plasma session not found; falling back to auto."
-        PLASMA_SESSION_INFO="$(find_plasma_session auto || true)"
-    fi
-
-    if [ -n "${PLASMA_SESSION_INFO}" ]; then
-        SDDM_DISPLAY_SERVER="${PLASMA_SESSION_INFO%%:*}"
-        SDDM_SESSION="${PLASMA_SESSION_INFO#*:}"
-    else
-        SDDM_DISPLAY_SERVER="x11"
-        SDDM_SESSION="plasma.desktop"
-        echo "[!] Warning: no Plasma session desktop file detected; defaulting to ${SDDM_SESSION}."
-    fi
-else
-    # Keep SDDM on X11 for maximum compatibility. Lomiri itself runs a Mir/Wayland session.
-    SDDM_DISPLAY_SERVER="x11"
-fi
-
-if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ]; then
-    # Lomiri uses LightDM with autologin into the Wayland/Mir session.
-    mkdir -p "${ROOTFS_MNT}/etc/lightdm"
-    # Remove KDE default session that conflicts with Lomiri.
-    rm -f "${ROOTFS_MNT}/usr/share/lightdm/lightdm.conf.d/40-kde-plasma-kf5.conf"
-    cat > "${ROOTFS_MNT}/etc/lightdm/lightdm.conf" << 'LIGHTDM_CONF'
+# Phosh uses LightDM with autologin into the Wayland session.
+cat > "${ROOTFS_MNT}/etc/lightdm/lightdm.conf" << 'LIGHTDM_CONF'
 [LightDM]
 
 [Seat:*]
 type=local
-user-session=lomiri
+user-session=phosh
 autologin-user=chaos
-autologin-session=lomiri
+autologin-session=phosh
 session-wrapper=/etc/X11/Xsession
 
 [XDMCPServer]
 
 [VNCServer]
 LIGHTDM_CONF
-else
-cat > "${ROOTFS_MNT}/etc/sddm.conf.d/10-rk-autologin.conf" << SDDM_AUTLOGIN
-[Autologin]
-User=chaos
-Session=${SDDM_SESSION}
-Relogin=false
-
-[General]
-DisplayServer=${SDDM_DISPLAY_SERVER}
-SDDM_AUTLOGIN
-
-# Configure an on-screen keyboard at the greeter for touch-only login.
-cat > "${ROOTFS_MNT}/etc/sddm.conf.d/20-rk-virtual-keyboard.conf" << 'SDDM_VK'
-[General]
-InputMethod=qtvirtualkeyboard
-GreeterEnvironment=QT_IM_MODULE=qtvirtualkeyboard
-SDDM_VK
-fi
+mkdir -p "${ROOTFS_MNT}/etc/X11" "${ROOTFS_MNT}/etc/systemd/system"
+printf '%s\n' '/usr/sbin/lightdm' > "${ROOTFS_MNT}/etc/X11/default-display-manager"
+ln -sfn /lib/systemd/system/lightdm.service "${ROOTFS_MNT}/etc/systemd/system/display-manager.service"
 
 # Stale user-unit symlinks from old sway-focused rootfs trees can trigger
-# waybar restart loops in Plasma sessions (and tank UI responsiveness).
+# waybar restart loops and tank UI responsiveness.
 rm -f "${ROOTFS_MNT}/etc/systemd/user/graphical-session.target.wants/waybar.service"
 
-# Export the Maliit input method globally so Lomiri and Plasma both pick up
-# the same Qt/GTK keyboard plugin wiring.
-mkdir -p "${ROOTFS_MNT}/etc/environment.d" "${ROOTFS_MNT}/etc/profile.d"
-cat > "${ROOTFS_MNT}/etc/environment.d/90-rkdebian-inputmethod.conf" << 'IM_ENV_SYSTEM'
-GTK_IM_MODULE=Maliit
-QT_IM_MODULE=maliitphablet
-XMODIFIERS=@im=none
-IM_ENV_SYSTEM
-cat > "${ROOTFS_MNT}/etc/profile.d/90-rkdebian-maliit.sh" << 'IM_PROFILE'
-#!/bin/sh
-export GTK_IM_MODULE=Maliit
-export QT_IM_MODULE=maliitphablet
-export XMODIFIERS=@im=none
-IM_PROFILE
-chmod +x "${ROOTFS_MNT}/etc/profile.d/90-rkdebian-maliit.sh"
+# Remove stale Maliit overrides from reused rootfs trees.
+rm -f "${ROOTFS_MNT}/etc/environment.d/90-rkdebian-inputmethod.conf" \
+      "${ROOTFS_MNT}/etc/profile.d/90-rkdebian-maliit.sh" \
+      "${ROOTFS_MNT}/home/chaos/.config/autostart/maliit-server.desktop"
 
-# Auto-show Maliit keyboard in Plasma sessions (Qt + GTK apps).
-mkdir -p "${ROOTFS_MNT}/home/chaos/.config/plasma-workspace/env"
-cat > "${ROOTFS_MNT}/home/chaos/.config/plasma-workspace/env/90-inputmethod.sh" << 'IM_ENV'
-#!/bin/sh
-export GTK_IM_MODULE=Maliit
-export QT_IM_MODULE=maliitphablet
-export XMODIFIERS=@im=none
-IM_ENV
-chmod +x "${ROOTFS_MNT}/home/chaos/.config/plasma-workspace/env/90-inputmethod.sh"
-chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/.config/plasma-workspace/env/90-inputmethod.sh || true
+# Install Phosh auto-rotation helper (raw accelerometer axis polling).
+# This mirrors the on-device fix:
+# - rotates from /sys axis_data when SensorProxy reports "undefined"
+# - honors Phosh top-bar rotation lock toggle
+# - uses landscape mapping tuned for this tablet panel orientation
+mkdir -p "${ROOTFS_MNT}/home/chaos/.local/bin" "${ROOTFS_MNT}/home/chaos/.config/autostart"
+cat > "${ROOTFS_MNT}/home/chaos/.local/bin/phosh-autorotate.sh" << 'PHOSH_AUTOROTATE'
+#!/usr/bin/env bash
+set -euo pipefail
 
-mkdir -p "${ROOTFS_MNT}/home/chaos/.config/autostart"
-cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/maliit-server.desktop" << 'MALIIT_AUTOSTART'
+OUTPUT_NAME="${OUTPUT_NAME:-DSI-1}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+LOG_FILE="$RUNTIME_DIR/phosh-autorotate.log"
+STATE_FILE="$RUNTIME_DIR/phosh-autorotate.state"
+AXIS_FILE="${AXIS_FILE:-/sys/devices/virtual/input/input2/axis_data}"
+# Ignore near-flat/noisy readings.
+AXIS_MIN="${AXIS_MIN:-260}"
+DOMINANCE_MARGIN="${DOMINANCE_MARGIN:-180}"
+STABLE_POLLS="${STABLE_POLLS:-3}"
+POLL_INTERVAL="${POLL_INTERVAL:-0.25}"
+# X-axis sign mapping for landscape; tuned for this panel.
+X_POS_TRANSFORM="${X_POS_TRANSFORM:-90}"
+X_NEG_TRANSFORM="${X_NEG_TRANSFORM:-270}"
+
+log() {
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE"
+}
+
+abs() {
+  local v="$1"
+  if (( v < 0 )); then
+    echo $(( -v ))
+  else
+    echo "$v"
+  fi
+}
+
+orientation_locked() {
+  local v
+  v="$(gsettings get org.gnome.settings-daemon.peripherals.touchscreen orientation-lock 2>/dev/null || echo false)"
+  [[ "$v" == "true" ]]
+}
+
+detect_wayland_display() {
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]] && wlr-randr >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local sock
+  for sock in "$RUNTIME_DIR"/wayland-*; do
+    [[ -S "$sock" ]] || continue
+    local candidate
+    candidate="$(basename "$sock")"
+    if WAYLAND_DISPLAY="$candidate" wlr-randr >/dev/null 2>&1; then
+      export WAYLAND_DISPLAY="$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+current_transform() {
+  wlr-randr 2>/dev/null | awk '/Transform:/ {print $2; exit}' || true
+}
+
+apply_transform() {
+  local transform="$1"
+  [[ -n "$transform" ]] || return 0
+
+  if orientation_locked; then
+    return 0
+  fi
+
+  local last=""
+  if [[ -f "$STATE_FILE" ]]; then
+    last="$(cat "$STATE_FILE" 2>/dev/null || true)"
+  fi
+
+  if [[ "$last" == "$transform" ]]; then
+    return 0
+  fi
+
+  if wlr-randr --output "$OUTPUT_NAME" --transform "$transform" >/dev/null 2>&1; then
+    printf '%s' "$transform" > "$STATE_FILE"
+    log "applied transform=$transform"
+  else
+    log "failed transform=$transform output=$OUTPUT_NAME"
+  fi
+}
+
+choose_transform() {
+  local x="$1" y="$2" z="$3"
+  local ax ay
+  ax="$(abs "$x")"
+  ay="$(abs "$y")"
+
+  # Ignore flat/noisy states.
+  if (( ax < AXIS_MIN && ay < AXIS_MIN )); then
+    echo ""
+    return 0
+  fi
+
+  if (( ay >= ax )); then
+    if (( ay - ax < DOMINANCE_MARGIN )); then
+      echo ""
+      return 0
+    fi
+    if (( y >= 0 )); then
+      echo "normal"
+    else
+      echo "180"
+    fi
+  else
+    if (( ax - ay < DOMINANCE_MARGIN )); then
+      echo ""
+      return 0
+    fi
+    if (( x >= 0 )); then
+      echo "$X_POS_TRANSFORM"
+    else
+      echo "$X_NEG_TRANSFORM"
+    fi
+  fi
+}
+
+for _ in $(seq 1 30); do
+  if detect_wayland_display; then
+    break
+  fi
+  sleep 1
+done
+
+if ! detect_wayland_display; then
+  log "unable to find active Wayland socket"
+  exit 1
+fi
+
+if [[ ! -r "$AXIS_FILE" ]]; then
+  log "axis file not readable: $AXIS_FILE"
+  exit 1
+fi
+
+# Seed state from compositor so we do not force-rotate on startup.
+printf '%s' "$(current_transform)" > "$STATE_FILE" 2>/dev/null || true
+log "starting raw-axis autorotate output=$OUTPUT_NAME wayland=$WAYLAND_DISPLAY axis=$AXIS_FILE"
+
+pending=""
+pending_count=0
+last_lock_state=""
+
+while true; do
+  lock_state="$(gsettings get org.gnome.settings-daemon.peripherals.touchscreen orientation-lock 2>/dev/null || echo false)"
+  if [[ "$lock_state" != "$last_lock_state" ]]; then
+    log "orientation-lock=$lock_state"
+    last_lock_state="$lock_state"
+  fi
+
+  line="$(cat "$AXIS_FILE" 2>/dev/null || true)"
+  if [[ "$line" =~ x=[[:space:]]*(-?[0-9]+)\;y=[[:space:]]*(-?[0-9]+)\;z=[[:space:]]*(-?[0-9]+) ]]; then
+    x="${BASH_REMATCH[1]}"
+    y="${BASH_REMATCH[2]}"
+    z="${BASH_REMATCH[3]}"
+    candidate="$(choose_transform "$x" "$y" "$z")"
+
+    if [[ -n "$candidate" ]]; then
+      if [[ "$candidate" == "$pending" ]]; then
+        pending_count=$((pending_count + 1))
+      else
+        pending="$candidate"
+        pending_count=1
+      fi
+
+      if (( pending_count >= STABLE_POLLS )); then
+        apply_transform "$candidate"
+      fi
+    else
+      pending=""
+      pending_count=0
+    fi
+  fi
+  sleep "$POLL_INTERVAL"
+done
+PHOSH_AUTOROTATE
+chmod +x "${ROOTFS_MNT}/home/chaos/.local/bin/phosh-autorotate.sh"
+
+cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/phosh-autorotate.desktop" << 'PHOSH_AUTOROTATE_DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=Maliit Server
-Comment=On-screen keyboard input method service
-Exec=/usr/bin/maliit-server
-OnlyShowIn=KDE;
+Version=1.0
+Name=Phosh Auto Rotate
+Comment=Auto-rotate display based on accelerometer axis data
+Exec=/home/chaos/.local/bin/phosh-autorotate.sh
+OnlyShowIn=Phosh;
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
-MALIIT_AUTOSTART
-chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/.config/autostart/maliit-server.desktop || true
+PHOSH_AUTOROTATE_DESKTOP
 
-if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ]; then
-mkdir -p "${ROOTFS_MNT}/etc/systemd/user/graphical-session.target.wants" \
-         "${ROOTFS_MNT}/etc/lomiri" \
-         "${ROOTFS_MNT}/etc/dconf/profile" \
-         "${ROOTFS_MNT}/etc/dconf/db/local.d"
-
-# Mali blob workaround: glGetString(GL_RENDERER) returns NULL in surfaceless
-# EGL contexts, which causes Mir's gbm-kms rendering probe to fail.
-# This LD_PRELOAD shim returns "Mali-G52" when the real call returns NULL.
-if [ "${RKDEBIAN_GPU_STACK}" = "mali" ]; then
-    echo "[*] Building Mali glGetString workaround for Mir/Lomiri..."
-    cat > "${ROOTFS_MNT}/tmp/gl_renderer_fix.c" << 'GL_FIX_C'
-#include <dlfcn.h>
-typedef unsigned int GLenum;
-const unsigned char* glGetString(GLenum name) {
-    static const unsigned char* (*real_glGetString)(GLenum) = 0;
-    if (!real_glGetString)
-        real_glGetString = dlsym(((void*)-1l), "glGetString");
-    const unsigned char* result = real_glGetString(name);
-    if (name == 0x1F01 && result == 0)
-        return (const unsigned char*)"Mali-G52";
-    return result;
-}
-GL_FIX_C
-    chroot "${ROOTFS_MNT}" gcc -shared -fPIC -o /usr/local/lib/gl_renderer_fix.so \
-        /tmp/gl_renderer_fix.c -ldl
-    rm -f "${ROOTFS_MNT}/tmp/gl_renderer_fix.c"
-
-    # Inject LD_PRELOAD into lomiri-session so Mir picks up the fix.
-    if [ -f "${ROOTFS_MNT}/usr/bin/lomiri-session" ] && \
-       ! grep -q 'gl_renderer_fix' "${ROOTFS_MNT}/usr/bin/lomiri-session"; then
-        sed -i '2a export LD_PRELOAD=/usr/local/lib/gl_renderer_fix.so' \
-            "${ROOTFS_MNT}/usr/bin/lomiri-session"
-    fi
-
-fi
-
-
-cat > "${ROOTFS_MNT}/etc/systemd/user/rk-lomiri-maliit-server.service" << 'LOMIRI_MALIIT'
-[Unit]
-Description=RKDEBIAN Maliit input method for Lomiri
-PartOf=graphical-session.target
-After=dbus.socket lomiri.service
-Requires=dbus.socket
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/maliit-server
-Restart=on-failure
-
-[Install]
-WantedBy=graphical-session.target
-LOMIRI_MALIIT
-ln -sf /etc/systemd/user/rk-lomiri-maliit-server.service \
-    "${ROOTFS_MNT}/etc/systemd/user/graphical-session.target.wants/rk-lomiri-maliit-server.service"
-
-# Do not auto-start a graphical polkit agent in Lomiri — it shows as a
-# visible terminal window inside the shell.  PolicyKit prompts will still
-# work via the polkitd daemon; they just won't get a GUI popup.
-rm -f "${ROOTFS_MNT}/etc/systemd/user/rk-lomiri-polkit-agent.service" \
-      "${ROOTFS_MNT}/etc/systemd/user/graphical-session.target.wants/rk-lomiri-polkit-agent.service"
-
-cat > "${ROOTFS_MNT}/etc/lomiri/devices.conf" << 'LOMIRI_DEVICES'
-# RK3562 tablet: allow all orientations, start in portrait
-# (matching the native 800x1280 panel).
-[rk3562-debian]
-SupportedOrientations=Portrait,InvertedPortrait,Landscape,InvertedLandscape
-PrimaryOrientation=Portrait
-Category=tablet
-
-[rk3562-rk817-tablet]
-SupportedOrientations=Portrait,InvertedPortrait,Landscape,InvertedLandscape
-PrimaryOrientation=Portrait
-Category=tablet
-
-[rockchip,rk3562-rk817-tablet]
-SupportedOrientations=Portrait,InvertedPortrait,Landscape,InvertedLandscape
-PrimaryOrientation=Portrait
-Category=tablet
-
-[Rockchip RK3562 RK817 TABLET LP4 Board]
-SupportedOrientations=Portrait,InvertedPortrait,Landscape,InvertedLandscape
-PrimaryOrientation=Portrait
-Category=tablet
-LOMIRI_DEVICES
-
-cat > "${ROOTFS_MNT}/etc/dconf/profile/user" << 'DCONF_PROFILE'
-user-db:user
-system-db:local
-DCONF_PROFILE
-cat > "${ROOTFS_MNT}/etc/dconf/db/local.d/00-rkdebian-lomiri" << 'DCONF_LOMIRI'
-[com/lomiri/shell]
-always-show-osk=true
-
-[org/maliit/keyboard/maliit]
-device='tablet'
-stay-hidden=false
-DCONF_LOMIRI
-chroot "${ROOTFS_MNT}" dconf update || true
-fi
+chroot "${ROOTFS_MNT}" chown chaos:chaos \
+    /home/chaos/.local/bin/phosh-autorotate.sh \
+    /home/chaos/.config/autostart/phosh-autorotate.desktop || true
 
 # Prevent duplicate/competing keyboards when reusing an old rootfs tree.
 cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/onboard.desktop" << 'ONBOARD_HIDE'
@@ -1258,10 +1196,10 @@ chroot "${ROOTFS_MNT}" chown chaos:chaos \
     /home/chaos/.config/autostart/onboard-autostart.desktop \
     /home/chaos/.config/autostart/maliit-keyboard.desktop || true
 
-# Trim background autostarts that are unnecessary in the Plasma tablet image.
+# Trim background autostarts that are unnecessary in the Phosh tablet image.
 # These either belong to other desktops (XFCE/GNOME) or are optional daemons
 # that cost responsiveness on this tablet.
-PLASMA_DISABLE_AUTOSTARTS="
+PHOSH_DISABLE_AUTOSTARTS="
 ayatana-indicator-application.desktop
 blueman.desktop
 geoclue-demo-agent.desktop
@@ -1276,7 +1214,7 @@ xfce4-power-manager.desktop
 xfsettingsd.desktop
 "
 
-for desktop in ${PLASMA_DISABLE_AUTOSTARTS}; do
+for desktop in ${PHOSH_DISABLE_AUTOSTARTS}; do
 cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/${desktop}" << 'AUTOSTART_HIDE'
 [Desktop Entry]
 Hidden=true
@@ -1284,7 +1222,7 @@ AUTOSTART_HIDE
 chroot "${ROOTFS_MNT}" chown chaos:chaos "/home/chaos/.config/autostart/${desktop}" || true
 done
 
-# Keep a fallback polkit agent autostart for Plasma sessions.
+# Keep a fallback polkit agent autostart for Phosh sessions.
 mkdir -p "${ROOTFS_MNT}/etc/xdg/autostart"
 if [ ! -f "${ROOTFS_MNT}/etc/xdg/autostart/polkit-gnome-authentication-agent-1.desktop" ]; then
 cat > "${ROOTFS_MNT}/etc/xdg/autostart/polkit-gnome-authentication-agent-1.desktop" << 'POLKIT'
@@ -1292,29 +1230,17 @@ cat > "${ROOTFS_MNT}/etc/xdg/autostart/polkit-gnome-authentication-agent-1.deskt
 Type=Application
 Name=PolicyKit Authentication Agent
 Exec=/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1
-OnlyShowIn=KDE;
+OnlyShowIn=Phosh;GNOME;
 X-GNOME-Autostart-enabled=true
 POLKIT
 fi
 
-# Optional launcher shortcut for maliit keyboard.
-mkdir -p "${ROOTFS_MNT}/home/chaos/Desktop"
-cat > "${ROOTFS_MNT}/home/chaos/Desktop/on-screen-keyboard.desktop" << 'MALIIT'
-[Desktop Entry]
-Type=Application
-Name=On-Screen Keyboard
-Comment=Launch on-screen keyboard
-Exec=maliit-keyboard
-Icon=input-keyboard
-Terminal=false
-Categories=Utility;
-MALIIT
-chmod +x "${ROOTFS_MNT}/home/chaos/Desktop/on-screen-keyboard.desktop"
-chroot "${ROOTFS_MNT}" chown chaos:chaos /home/chaos/Desktop/on-screen-keyboard.desktop || true
+# Remove stale keyboard launcher that points to Maliit binaries.
+rm -f "${ROOTFS_MNT}/home/chaos/Desktop/on-screen-keyboard.desktop"
 
-# Ensure user-level Plasma config/cache dirs are writable by the session user.
+# Ensure user-level config/cache dirs are writable by the session user.
 # Some build-time mkdir operations run as root and can otherwise leave these
-# directories owned by root, which breaks Plasma startup.
+# directories owned by root, which breaks desktop startup.
 mkdir -p "${ROOTFS_MNT}/home/chaos/.local" "${ROOTFS_MNT}/home/chaos/.cache"
 chroot "${ROOTFS_MNT}" chown -R chaos:chaos \
     /home/chaos/.config \
@@ -1939,7 +1865,7 @@ if __name__ == "__main__":
 RK_SCREEN_ROTATE
 chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-screen-rotate.py"
 
-# Wayland desktop env vars for Plasma sessions.
+# Wayland desktop env vars for Phosh sessions.
 cat > "${ROOTFS_MNT}/etc/profile.d/rk-wayland.sh" << 'RK_WAYLAND_PROFILE'
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
     export GDK_BACKEND=wayland,x11
@@ -2053,7 +1979,7 @@ cat > "${ROOTFS_MNT}/etc/xdg/autostart/rk-audio-session-fix.desktop" << 'RK_AUDI
 Type=Application
 Name=RK Audio Session Fix
 Exec=/usr/local/bin/rk-audio-session-fix.sh
-OnlyShowIn=KDE;
+OnlyShowIn=Phosh;GNOME;
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 RK_AUDIO_SESSION_DESKTOP
@@ -2331,40 +2257,46 @@ STATE_DIR=/var/lib/rk-session-failsafe
 ARMED_FILE="${STATE_DIR}/armed"
 [ -f "${ARMED_FILE}" ] || exit 0
 
-session_file=/etc/sddm.conf.d/10-rk-autologin.conf
-if [ -f "${session_file}" ] && grep -q '^Session=lomiri.desktop$' "${session_file}"; then
+if [ -f /etc/lightdm/lightdm.conf ] && grep -q '^autologin-session=phosh$' /etc/lightdm/lightdm.conf; then
     if loginctl list-sessions --no-legend 2>/dev/null | awk '$3=="chaos"{found=1} END{exit(found?0:1)}'; then
-        if pgrep -u chaos -f '/usr/bin/lomiri' >/dev/null 2>&1 || \
-           pgrep -u chaos -f 'dm-lomiri-session' >/dev/null 2>&1 || \
-           pgrep -u chaos -f 'lomiri-session' >/dev/null 2>&1; then
+        if pgrep -u chaos -f '/usr/libexec/phosh' >/dev/null 2>&1 || \
+           pgrep -u chaos -x phoc >/dev/null 2>&1; then
             rm -f "${ARMED_FILE}"
-            logger -t rk-session-failsafe "Lomiri session detected; disarmed watchdog without rollback"
+            logger -t rk-session-failsafe "Phosh session detected; disarmed watchdog without rollback"
             exit 0
         fi
     fi
 fi
 
-install -d /etc/sddm.conf.d /etc/X11 /etc/systemd/system
-cat > /etc/sddm.conf.d/10-rk-autologin.conf << 'AUTLOGIN'
-[Autologin]
-User=chaos
-Session=plasma.desktop
-Relogin=false
-AUTLOGIN
-rm -f /etc/lightdm/lightdm.conf.d/50-rk-autologin.conf
-printf '%s\n' '/usr/bin/sddm' > /etc/X11/default-display-manager
-ln -sfn /lib/systemd/system/sddm.service /etc/systemd/system/display-manager.service
-systemctl disable lightdm >/dev/null 2>&1 || true
-systemctl enable sddm >/dev/null 2>&1 || true
+install -d /etc/lightdm /etc/X11 /etc/systemd/system
+cat > /etc/lightdm/lightdm.conf << 'LIGHTDM_CONF'
+[LightDM]
+
+[Seat:*]
+type=local
+user-session=phosh
+autologin-user=chaos
+autologin-session=phosh
+session-wrapper=/etc/X11/Xsession
+
+[XDMCPServer]
+
+[VNCServer]
+LIGHTDM_CONF
+rm -rf /etc/sddm.conf.d
+printf '%s\n' '/usr/sbin/lightdm' > /etc/X11/default-display-manager
+ln -sfn /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service
+systemctl disable sddm >/dev/null 2>&1 || true
+systemctl enable lightdm >/dev/null 2>&1 || true
 rm -f "${ARMED_FILE}"
-logger -t rk-session-failsafe "Rollback to plasma triggered; rebooting"
+logger -t rk-session-failsafe "Rollback to phosh triggered; rebooting"
 systemctl --no-block reboot
 RK_SESSION_FAILSAFE
 chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-session-failsafe.sh"
 
 cat > "${ROOTFS_MNT}/etc/systemd/system/rk-session-failsafe.service" << 'RK_SESSION_FAILSAFE_UNIT'
 [Unit]
-Description=Rollback tablet display manager if Lomiri test is still armed
+Description=Rollback tablet display manager if Phosh test is still armed
 ConditionPathExists=/var/lib/rk-session-failsafe/armed
 After=multi-user.target
 

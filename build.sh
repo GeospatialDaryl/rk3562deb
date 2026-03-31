@@ -23,8 +23,8 @@ UBOOT_DEFCONFIG="rk3562_defconfig"
 KERNEL_DEFCONFIG="rockchip_linux_defconfig"
 KERNEL_DTB="rk3562-rk817-tablet-v10.dtb"
 KERNEL_DTB_PANFROST="rk3562-rk817-tablet-v10-panfrost.dtb"
-RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-x11}"
-RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION:-plasma}"
+RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-wayland}"
+RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION:-phosh}"
 RKDEBIAN_GPU_STACK="${RKDEBIAN_GPU_STACK:-mali}"
 RKDEBIAN_CPU_GOVERNOR="${RKDEBIAN_CPU_GOVERNOR:-performance}"
 RKDEBIAN_FORCE_CLEAN_ROOTFS="${RKDEBIAN_FORCE_CLEAN_ROOTFS:-0}"
@@ -59,7 +59,7 @@ usage() {
 Usage: ./build.sh [options] {check|lunch|uboot|extboot|updateimg|updatepkg|compile|rootfs|image|all}
 
 Options:
-  --ui-session {plasma|lomiri}
+  --ui-session {phosh}
   --gpu-stack {mali|panfrost}
   --display-server {auto|wayland|x11}
   --cpu-governor VALUE
@@ -164,9 +164,9 @@ case "${RKDEBIAN_DISPLAY_SERVER}" in
 esac
 
 case "${RKDEBIAN_UI_SESSION}" in
-    plasma|lomiri) ;;
+    phosh) ;;
     *)
-        echo "[-] Error: unsupported RKDEBIAN_UI_SESSION=${RKDEBIAN_UI_SESSION} (expected plasma or lomiri)."
+        echo "[-] Error: unsupported RKDEBIAN_UI_SESSION=${RKDEBIAN_UI_SESSION} (expected phosh)."
         exit 1
         ;;
 esac
@@ -198,9 +198,8 @@ verify_rootfs_profile() {
         exit 1
     fi
 
-    if [ "${RKDEBIAN_UI_SESSION}" = "lomiri" ] && \
-       [ ! -f "${OUT_DIR}/rootfs/usr/share/wayland-sessions/lomiri.desktop" ]; then
-        echo "[-] Error: lomiri.desktop is missing from the rootfs."
+    if [ ! -f "${OUT_DIR}/rootfs/usr/share/wayland-sessions/phosh.desktop" ]; then
+        echo "[-] Error: phosh.desktop is missing from the rootfs."
         exit 1
     fi
 }
@@ -676,9 +675,15 @@ create_image() {
         exit 1
     fi
     
+    # genimage requires --rootpath; use an empty dir so it doesn't recreate
+    # rootfs.ext4 (which is already pre-built above with mkfs.ext4).
+    # Keep it outside --tmppath because genimage requires tmppath to be empty.
+    local empty_rootpath="${OUT_DIR}/empty_rootpath"
+    rm -rf "${empty_rootpath}"
+    mkdir -p "${empty_rootpath}"
     sudo genimage \
         --config "${ROOT_DIR}/genimage.cfg" \
-        --rootpath "${OUT_DIR}/rootfs" \
+        --rootpath "${empty_rootpath}" \
         --tmppath "${OUT_DIR}/tmp" \
         --inputpath "${OUT_DIR}" \
         --outputpath "${OUT_DIR}"

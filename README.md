@@ -122,8 +122,8 @@ These variables can be set before running `build.sh` to control build behaviour:
 | `ROOTFS_IMAGE_SIZE` | `auto` | Override the rootfs partition size (e.g. `4G`, `3584M`). By default the size is calculated automatically from actual rootfs usage plus headroom. |
 | `ROOTFS_HEADROOM_MB` | `512` | Free space headroom added on top of actual rootfs usage when using `auto` sizing. |
 | `ROOTFS_MIN_MB` | `2560` | Minimum rootfs image size in MiB when using `auto` sizing. |
-| `RKDEBIAN_DISPLAY_SERVER` | `x11` | Desktop session backend used for Plasma auto-login selection (`x11`, `wayland`, or `auto`). |
-| `RKDEBIAN_UI_SESSION` | `plasma` | UI session to auto-login in SDDM: `plasma` or `lomiri`. |
+| `RKDEBIAN_DISPLAY_SERVER` | `wayland` | Session backend preference for desktop stack selection (`wayland`, `x11`, or `auto`). Phosh images use Wayland by default. |
+| `RKDEBIAN_UI_SESSION` | `phosh` | UI session to auto-login in LightDM. Current supported value: `phosh`. |
 | `RKDEBIAN_GPU_STACK` | `mali` | GPU stack to build for: `mali` (vendor userspace) or `panfrost` (Mesa/Panfrost, no `libmali`). |
 
 ### Kernel
@@ -157,13 +157,13 @@ RKDEBIAN_KEEP_OVERLAY_PMIC_PATCHES=1 ./build.sh extboot
 # Force a Wayland desktop image for testing
 ./build.sh all --display-server=wayland
 
-# Build a Lomiri image on Mesa/Panfrost (recommended with clean rootfs)
-./build.sh all --ui-session=lomiri --gpu-stack=panfrost --force-clean-rootfs
+# Build a Phosh image on Mesa/Panfrost (recommended with clean rootfs)
+./build.sh all --ui-session=phosh --gpu-stack=panfrost --force-clean-rootfs
 ```
 
 When changing `RKDEBIAN_UI_SESSION` or `RKDEBIAN_GPU_STACK`, use `--force-clean-rootfs` to avoid stale package carry-over.
 
-### Safe Lomiri Session Testing (on-device)
+### Safe Phosh Session Testing (on-device)
 
 Images include `rk-session-failsafe.timer`, which checks 5 minutes after boot if a risky session test is still armed.
 
@@ -175,8 +175,8 @@ sudo reboot
 ```
 
 Behavior:
-- If Lomiri is healthy, watchdog auto-disarms and does nothing.
-- If session bring-up fails, watchdog switches SDDM autologin back to Plasma and reboots.
+- If Phosh is healthy, watchdog auto-disarms and does nothing.
+- If session bring-up fails, watchdog restores LightDM + Phosh autologin and reboots.
 
 ---
 
