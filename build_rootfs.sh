@@ -18,6 +18,7 @@ RKDEBIAN_DISPLAY_SERVER="${RKDEBIAN_DISPLAY_SERVER:-wayland}"
 RKDEBIAN_CPU_GOVERNOR="${RKDEBIAN_CPU_GOVERNOR:-performance}"
 RKDEBIAN_GPU_STACK="${RKDEBIAN_GPU_STACK:-mali}"
 RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION:-phosh}"
+RKDEBIAN_MALI_GBM_PROVIDER="${RKDEBIAN_MALI_GBM_PROVIDER:-vendor}"
 
 case "${RKDEBIAN_DISPLAY_SERVER}" in
     auto|wayland|x11) ;;
@@ -51,8 +52,16 @@ case "${RKDEBIAN_UI_SESSION}" in
         ;;
 esac
 
+case "${RKDEBIAN_MALI_GBM_PROVIDER}" in
+    vendor|debian) ;;
+    *)
+        echo "[-] Unsupported RKDEBIAN_MALI_GBM_PROVIDER=${RKDEBIAN_MALI_GBM_PROVIDER} (expected vendor or debian)."
+        exit 1
+        ;;
+esac
+
 echo "[*] Building Debian 12 Bookworm arm64 rootfs..."
-echo "[*] UI session: ${RKDEBIAN_UI_SESSION} | GPU stack: ${RKDEBIAN_GPU_STACK}"
+echo "[*] UI session: ${RKDEBIAN_UI_SESSION} | GPU stack: ${RKDEBIAN_GPU_STACK} | mali libgbm: ${RKDEBIAN_MALI_GBM_PROVIDER}"
 
 chroot_cleanup() {
     local mount_path
@@ -253,14 +262,21 @@ visudo -cf /etc/sudoers >/dev/null
 echo "root:root" | chpasswd
 
 # Setup NetworkManager
+enable_if_installable() {
+    local unit_name="$1"
+    if systemctl cat "${unit_name}" 2>/dev/null | grep -q '^\[Install\]'; then
+        systemctl enable "${unit_name}" >/dev/null 2>&1 || true
+    fi
+}
+
 systemctl enable NetworkManager
-systemctl enable bluetooth
-systemctl enable upower || true
+enable_if_installable bluetooth.service
+enable_if_installable upower.service
 # Select display manager: LightDM for Phosh.
 rm -f /etc/systemd/system/display-manager.service
 systemctl disable sddm 2>/dev/null || true
 systemctl enable lightdm
-systemctl enable packagekit || true
+enable_if_installable packagekit.service
 
 # Enable compressed RAM swap to improve responsiveness on 4GB systems.
 cat > /etc/default/zramswap << 'ZRAMCFG'
@@ -297,9 +313,10 @@ else
     printf '\n[Policy]\nAutoEnable=true\n' >> /etc/bluetooth/main.conf
 fi
 
-# Force Firefox to use EGL on X11 so compositing can use GPU.
+# Firefox launcher defaults for RK3562: prefer native Wayland + VAAPI and
+# neutralize stale MOZ_X11_EGL values inherited from login environments.
 if [ -f /usr/share/applications/firefox-esr.desktop ]; then
-    sed -i -E 's|^Exec=.*firefox-esr.*$|Exec=env MOZ_DISABLE_RDD_SANDBOX=1 /usr/lib/firefox-esr/firefox-esr %u|' \
+    sed -i -E 's|^Exec=.*firefox-esr.*$|Exec=env -u MOZ_X11_EGL MOZ_DISABLE_RDD_SANDBOX=1 MOZ_ENABLE_WAYLAND=1 MOZ_WAYLAND_USE_VAAPI=1 MOZ_DRM_DEVICE=/dev/dri/renderD128 LIBVA_DRIVER_NAME=rockchip /usr/lib/firefox-esr/firefox-esr %u|' \
         /usr/share/applications/firefox-esr.desktop || true
 fi
 
@@ -307,7 +324,13 @@ fi
 if command -v plymouth-set-default-theme >/dev/null 2>&1; then
     plymouth-set-default-theme spinner || true
 fi
-systemctl enable plymouth-start.service plymouth-quit.service plymouth-quit-wait.service 2>/dev/null || true
+# Some Plymouth units are static on Debian and emit warnings when "enabled".
+# Enable only units that actually advertise an [Install] section.
+for ply_unit in plymouth-start.service plymouth-quit.service plymouth-quit-wait.service; do
+    if systemctl cat "${ply_unit}" 2>/dev/null | grep -q '^\[Install\]'; then
+        systemctl enable "${ply_unit}" >/dev/null 2>&1 || true
+    fi
+done
 
 CHROOT_EOF
 
@@ -316,8 +339,11 @@ if [ ! -f "${ROOTFS_MNT}/tmp/setup_debian.sh" ]; then
     echo "[-] Missing chroot setup script: ${ROOTFS_MNT}/tmp/setup_debian.sh"
     exit 1
 fi
-# Run through /bin/bash explicitly to avoid direct-exec/shebang edge cases.
-chroot "${ROOTFS_MNT}" env RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION}" QEMU_RESERVED_VA=0x4000000000 /bin/bash /tmp/setup_debian.sh
+# Execute chroot setup via bash explicitly to avoid shebang/direct-exec edge cases.
+if ! chroot "${ROOTFS_MNT}" env RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION}" QEMU_RESERVED_VA=0x4000000000 /bin/bash /tmp/setup_debian.sh; then
+    echo "[-] Error: chroot setup script failed (/tmp/setup_debian.sh)."
+    exit 1
+fi
 rm "${ROOTFS_MNT}/tmp/setup_debian.sh"
 
 # Do not silently continue when the requested Phosh session is missing.
@@ -430,30 +456,37 @@ if [ "${RKDEBIAN_GPU_STACK}" = "panfrost" ]; then
           "${ROOTFS_MNT}/etc/ld.so.conf.d/00-aarch64-mali.conf"
     chroot "${ROOTFS_MNT}" ldconfig
 else
-    # Keep Mesa GBM fallback, and make Mali GBM path use Debian libgbm.
-    # Some Mali blobs ship an old libgbm missing gbm_bo_create_with_modifiers2,
-    # which causes Wayland compositor startup failures.
+    # Mali userspace stack. Default is to keep vendor libgbm as shipped by the
+    # selected libmali package. If needed, callers can force Debian libgbm via
+    # RKDEBIAN_MALI_GBM_PROVIDER=debian.
     if compgen -G "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libmali*.so" > /dev/null || \
        [ -e "${ROOTFS_MNT}/lib/aarch64-linux-gnu/libmali.so.1" ] || \
        [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libmali.so.1" ] || \
        [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1" ]; then
-        echo "[*] Preserving Mesa EGL fallback and fixing Mali libgbm path..."
+        mali_dir="${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali"
+        mali_gbm_backup="${mali_dir}/.libgbm.so.1.rkbak"
 
-        # Force the Mali libgbm path to resolve to Debian's libgbm implementation.
-        if [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libgbm.so.1" ]; then
-            mali_gbm_backup="${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/.libgbm.so.1.rkbak"
-            if [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1" ] && \
-               [ ! -e "${mali_gbm_backup}" ]; then
-                cp -a "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1" \
-                      "${mali_gbm_backup}"
+        if [ "${RKDEBIAN_MALI_GBM_PROVIDER}" = "debian" ]; then
+            echo "[*] Forcing Mali libgbm path to Debian libgbm (override enabled)..."
+
+            if [ -e "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/libgbm.so.1" ]; then
+                if [ -e "${mali_dir}/libgbm.so.1" ] && [ ! -e "${mali_gbm_backup}" ]; then
+                    cp -a "${mali_dir}/libgbm.so.1" "${mali_gbm_backup}"
+                fi
+
+                # Drop legacy backup names that match lib*.so*; ldconfig can
+                # relink libgbm.so.1 back to them and undo the intended pin.
+                rm -f "${mali_dir}/libgbm.so.1.rkbak"
+                ln -sfn /usr/lib/aarch64-linux-gnu/libgbm.so.1 "${mali_dir}/libgbm.so.1"
+                ln -sfn libgbm.so.1 "${mali_dir}/libgbm.so"
             fi
-            # Drop legacy backup names that match lib*.so*; ldconfig can relink
-            # libgbm.so.1 back to them and undo the intended Debian libgbm pin.
-            rm -f "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1.rkbak"
-            ln -sfn /usr/lib/aarch64-linux-gnu/libgbm.so.1 \
-                    "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so.1"
-            ln -sfn libgbm.so.1 \
-                    "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/mali/libgbm.so"
+        else
+            echo "[*] Keeping vendor Mali libgbm (default)..."
+
+            if [ -e "${mali_gbm_backup}" ]; then
+                cp -af "${mali_gbm_backup}" "${mali_dir}/libgbm.so.1"
+            fi
+            ln -sfn libgbm.so.1 "${mali_dir}/libgbm.so"
         fi
 
         chroot "${ROOTFS_MNT}" ldconfig
@@ -681,14 +714,14 @@ FF_VAAPI_ENABLED="false"
 if [ -f "${ROOTFS_MNT}/usr/lib/aarch64-linux-gnu/dri/rockchip_drv_video.so" ]; then
     FF_VAAPI_ENABLED="true"
     cat > "${ROOTFS_MNT}/usr/lib/firefox-esr/defaults/pref/rk3562-gfx.js" << 'FIREFOX_PREFS_HW'
-pref("gfx.webrender.all", true);
-pref("gfx.x11-egl.force-enabled", true);
-pref("layers.acceleration.force-enabled", true);
 pref("media.hardware-video-decoding.enabled", true);
 pref("media.hardware-video-decoding.force-enabled", true);
 pref("media.ffmpeg.vaapi.enabled", true);
 pref("media.ffmpeg.dmabuf-textures.enabled", true);
 pref("media.rdd-ffmpeg.enabled", true);
+pref("media.ffvpx.enabled", false);
+pref("media.webm.enabled", false);
+pref("media.mediasource.webm.enabled", false);
 pref("media.av1.enabled", false);
 pref("media.mediasource.av1.enabled", false);
 pref("media.mediasource.vp9.enabled", false);
@@ -696,14 +729,12 @@ FIREFOX_PREFS_HW
 else
     echo "[!] Warning: rockchip_drv_video.so missing; using Firefox software-video fallback profile."
     cat > "${ROOTFS_MNT}/usr/lib/firefox-esr/defaults/pref/rk3562-gfx.js" << 'FIREFOX_PREFS_SW'
-pref("gfx.webrender.all", false);
-pref("gfx.x11-egl.force-enabled", false);
-pref("layers.acceleration.force-enabled", false);
 pref("media.hardware-video-decoding.enabled", false);
 pref("media.hardware-video-decoding.force-enabled", false);
 pref("media.ffmpeg.vaapi.enabled", false);
 pref("media.ffmpeg.dmabuf-textures.enabled", false);
 pref("media.rdd-ffmpeg.enabled", true);
+pref("media.ffvpx.enabled", false);
 pref("media.mediasource.enabled", false);
 pref("media.webm.enabled", false);
 pref("media.mediasource.webm.enabled", false);
@@ -715,13 +746,23 @@ fi
 
 # Keep Firefox environment deterministic across rebuilds.
 touch "${ROOTFS_MNT}/etc/environment"
-sed -i '/^MOZ_X11_EGL=/d;/^MOZ_WEBRENDER=/d;/^MOZ_DISABLE_RDD_SANDBOX=/d' \
+sed -i '/^MOZ_DISABLE_RDD_SANDBOX=/d;/^MOZ_X11_EGL=/d;/^MOZ_WEBRENDER=/d' \
     "${ROOTFS_MNT}/etc/environment" || true
 echo "MOZ_DISABLE_RDD_SANDBOX=1" >> "${ROOTFS_MNT}/etc/environment"
-if [ "${FF_VAAPI_ENABLED}" = "true" ]; then
-    echo "MOZ_X11_EGL=1" >> "${ROOTFS_MNT}/etc/environment"
-    echo "MOZ_WEBRENDER=1" >> "${ROOTFS_MNT}/etc/environment"
-fi
+
+# Auto-install h264ify on first Firefox run to keep YouTube on H.264 streams.
+mkdir -p "${ROOTFS_MNT}/usr/lib/firefox-esr/distribution"
+cat > "${ROOTFS_MNT}/usr/lib/firefox-esr/distribution/policies.json" << 'FIREFOX_POLICIES'
+{
+  "policies": {
+    "Extensions": {
+      "Install": [
+        "https://addons.mozilla.org/firefox/downloads/latest/h264ify/latest.xpi"
+      ]
+    }
+  }
+}
+FIREFOX_POLICIES
 
 # ── Custom Plymouth boot splash ────────────────────────────────────────────
 # Replaces the plain black screen with a navy gradient, "RK3562 / Debian
@@ -871,32 +912,33 @@ mkdir -p "${ROOTFS_MNT}/etc/chromium.d"
 if [ "${FF_VAAPI_ENABLED}" = "true" ]; then
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_HW_FLAGS'
 # RK3562 hardware acceleration — sourced by /usr/bin/chromium wrapper
-# Native Mali EGL (wayland-gbm platform) for GPU compositing.
+# Let Chromium select its default GL backend for this build.
+# On Debian Chromium arm64, forcing --use-gl=egl can trigger GPU init fallback.
 # VAAPI hardware video decode via rockchip_drv_video.so + MPP.
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=egl"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-compositing"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-gpu-sandbox"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-accelerated-video-decode"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-features=VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --disable-features=UseChromeOSDirectVideoDecoder"
-# ── FALLBACK: if --use-gl=egl crashes, try ANGLE instead: ──
+# ── FALLBACK: if Chromium regresses, force ANGLE explicitly: ──
 # CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
 # CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
 CHROMIUM_HW_FLAGS
 else
-    # No rockchip VAAPI driver — native Mali EGL compositing, software video decode.
+    # No rockchip VAAPI driver — GPU compositing only, software video decode.
     cat > "${ROOTFS_MNT}/etc/chromium.d/rk3562-hw-accel" << 'CHROMIUM_SW_FLAGS'
-# RK3562 — Native Mali EGL compositing, software video decode
+# RK3562 — GPU compositing, software video decode
 # (VAAPI driver not found at build time)
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ozone-platform=wayland"
-CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=egl"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --ignore-gpu-blocklist"
 CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-rasterization"
-# ── FALLBACK: if --use-gl=egl crashes, try ANGLE instead: ──
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --enable-gpu-compositing"
+# ── FALLBACK: if Chromium regresses, force ANGLE explicitly: ──
 # CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-gl=angle"
 # CHROMIUM_FLAGS="${CHROMIUM_FLAGS} --use-angle=opengles"
 CHROMIUM_SW_FLAGS
@@ -1873,6 +1915,9 @@ if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
     export SDL_VIDEODRIVER=wayland
     export MOZ_ENABLE_WAYLAND=1
     export MOZ_DISABLE_RDD_SANDBOX=1
+    export MOZ_WAYLAND_USE_VAAPI=1
+    export MOZ_DRM_DEVICE=/dev/dri/renderD128
+    export LIBVA_DRIVER_NAME=rockchip
     export ELECTRON_OZONE_PLATFORM_HINT=auto
 fi
 RK_WAYLAND_PROFILE

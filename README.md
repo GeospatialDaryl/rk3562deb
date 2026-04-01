@@ -125,6 +125,7 @@ These variables can be set before running `build.sh` to control build behaviour:
 | `RKDEBIAN_DISPLAY_SERVER` | `wayland` | Session backend preference for desktop stack selection (`wayland`, `x11`, or `auto`). Phosh images use Wayland by default. |
 | `RKDEBIAN_UI_SESSION` | `phosh` | UI session to auto-login in LightDM. Current supported value: `phosh`. |
 | `RKDEBIAN_GPU_STACK` | `mali` | GPU stack to build for: `mali` (vendor userspace) or `panfrost` (Mesa/Panfrost, no `libmali`). |
+| `RKDEBIAN_MALI_GBM_PROVIDER` | `vendor` | Mali-only option: `vendor` keeps `mali/libgbm.so.1` from the blob package (default), `debian` overrides it to Debian `libgbm.so.1` for compatibility testing. |
 
 ### Kernel
 
@@ -157,8 +158,11 @@ RKDEBIAN_KEEP_OVERLAY_PMIC_PATCHES=1 ./build.sh extboot
 # Force a Wayland desktop image for testing
 ./build.sh all --display-server=wayland
 
-# Build a Phosh image on Mesa/Panfrost (recommended with clean rootfs)
+# Build a Phosh image on Mesa/Panfrost (clean rootfs strongly advised)
 ./build.sh all --ui-session=phosh --gpu-stack=panfrost --force-clean-rootfs
+
+# Mali stack with Debian libgbm override (only for compatibility testing)
+RKDEBIAN_MALI_GBM_PROVIDER=debian ./build.sh all --ui-session=phosh --gpu-stack=mali --force-clean-rootfs
 ```
 
 When changing `RKDEBIAN_UI_SESSION` or `RKDEBIAN_GPU_STACK`, use `--force-clean-rootfs` to avoid stale package carry-over.
