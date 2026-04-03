@@ -580,19 +580,23 @@
 				};
 			};
 
-			vcc1v2_dvp: LDO_REG8 {
-				regulator-min-microvolt = <1200000>;
-				regulator-max-microvolt = <1200000>;
-				regulator-name = "vcc1v2_dvp";
+			vcc1v8_dvp: LDO_REG8 {
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-name = "vcc1v8_dvp";
 				regulator-state-mem {
 					regulator-off-in-suspend;
 				};
 			};
 
-			vcc2v8_dvp: LDO_REG9 {
-				regulator-min-microvolt = <2800000>;
-				regulator-max-microvolt = <2800000>;
-				regulator-name = "vcc2v8_dvp";
+			vcc1v2_dvp: LDO_REG9 {
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-name = "vcc1v2_dvp";
 				regulator-state-mem {
 					regulator-off-in-suspend;
 				};
@@ -926,4 +930,18 @@
 
 &vop_mmu {
 	status = "okay";
+};
+
+/*
+ * Camera bring-up debug: keep camera rails enabled at boot so
+ * sensor I2C probing can be validated independently of runtime PM.
+ */
+&vcc1v8_dvp {
+	regulator-boot-on;
+	regulator-always-on;
+};
+
+&vcc1v2_dvp {
+	regulator-boot-on;
+	regulator-always-on;
 };
