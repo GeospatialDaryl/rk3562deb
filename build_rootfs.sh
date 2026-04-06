@@ -247,6 +247,15 @@ else
     echo "[!] Warning: snapshot not available on current mirror."
 fi
 
+# Install Drawing when available as a touch-friendly paint app.
+drawing_ver=$(apt-cache policy drawing 2>/dev/null | awk '/Candidate:/{print $2}')
+if [ -n "${drawing_ver}" ] && [ "${drawing_ver}" != "(none)" ]; then
+    apt-get install -y drawing || \
+        echo "[!] Warning: drawing install failed, skipping"
+else
+    echo "[!] Warning: drawing not available on current mirror."
+fi
+
 # Ensure reused rootfs trees do not keep a previously installed Cheese stack.
 if dpkg-query -W -f='${Status}' cheese 2>/dev/null | grep -q "install ok installed"; then
     echo "[*] Purging stale camera package: cheese"

@@ -832,6 +832,15 @@
 	status = "okay";
 };
 
+&rknpu {
+	rknpu-supply = <&vdd_npu>;
+	status = "okay";
+};
+
+&rknpu_mmu {
+	status = "okay";
+};
+
 &route_dsi {
 	status = "okay";
 };
