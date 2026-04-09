@@ -1670,6 +1670,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 export DISPLAY="${DISPLAY:-:0}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+MODE="${1:-natural}"
+
+case "${MODE}" in
+    natural|boosted) ;;
+    *)
+        echo "Usage: $0 [natural|boosted]"
+        exit 2
+        ;;
+esac
 
 MEDIA_DEV=""
 for dev in /dev/media0 /dev/media1 /dev/media2; do
@@ -1702,34 +1711,65 @@ v4l2-ctl -d /dev/v4l-subdev6 -c exposure=1964 >/dev/null 2>&1 || true
 v4l2-ctl -d /dev/v4l-subdev6 -c analogue_gain=1024 >/dev/null 2>&1 || true
 v4l2-ctl -d /dev/video23 --set-fmt-video=width=1280,height=720,pixelformat=UYVY >/dev/null 2>&1 || true
 
+# Start ISP AWB gain feeder so the ISP outputs real color (not monochrome).
+# Without this, rkisp_v8 defaults to zero AWB gains → U=V=128 (gray output).
+AWB_PID=""
+if command -v rkisp1-awb >/dev/null 2>&1; then
+    rkisp1-awb 512 256 256 640 &
+    AWB_PID="$!"
+fi
+
 cleanup() {
+    [ -n "$AWB_PID" ] && kill "$AWB_PID" 2>/dev/null || true
     systemctl --user restart rkcam-webcam.service >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
-gst-launch-1.0 --no-fault \
-  v4l2src device=/dev/video23 io-mode=0 do-timestamp=true ! \
-  video/x-raw,format=UYVY,width=1280,height=720,framerate=15/1 ! \
-  videobalance brightness=0.25 contrast=1.6 ! \
-  videoconvert ! ximagesink sync=false
+if [ "${MODE}" = "boosted" ]; then
+    gst-launch-1.0 --no-fault \
+      v4l2src device=/dev/video23 io-mode=0 do-timestamp=true ! \
+      video/x-raw,format=UYVY,width=1280,height=720,framerate=15/1 ! \
+      videobalance brightness=0.25 contrast=1.6 ! \
+      videoconvert ! ximagesink sync=false
+else
+    gst-launch-1.0 --no-fault \
+      v4l2src device=/dev/video23 io-mode=0 do-timestamp=true ! \
+      video/x-raw,format=UYVY,width=1280,height=720,framerate=15/1 ! \
+      videoconvert ! ximagesink sync=false
+fi
 FRONT_CAM_PREVIEW
 chmod +x "${ROOTFS_MNT}/home/chaos/.local/bin/front-camera-preview.sh"
 
-cat > "${ROOTFS_MNT}/home/chaos/.local/share/applications/front-camera-preview.desktop" << 'FRONT_CAM_DESKTOP'
+cat > "${ROOTFS_MNT}/home/chaos/.local/share/applications/front-camera-preview-natural.desktop" << 'FRONT_CAM_NATURAL_DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=Front Camera Preview
-Comment=Open a live front camera test window
-Exec=/home/chaos/.local/bin/front-camera-preview.sh
+Name=Front Camera Preview (Natural)
+Comment=Open a live front camera test window with natural colors
+Exec=/home/chaos/.local/bin/front-camera-preview.sh natural
 Icon=camera-photo
 Categories=AudioVideo;Video;
 Terminal=false
 StartupNotify=true
-FRONT_CAM_DESKTOP
+FRONT_CAM_NATURAL_DESKTOP
+
+cat > "${ROOTFS_MNT}/home/chaos/.local/share/applications/front-camera-preview-boosted.desktop" << 'FRONT_CAM_BOOSTED_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Front Camera Preview (Boosted)
+Comment=Open a brighter higher-contrast front camera test window
+Exec=/home/chaos/.local/bin/front-camera-preview.sh boosted
+Icon=camera-photo
+Categories=AudioVideo;Video;
+Terminal=false
+StartupNotify=true
+FRONT_CAM_BOOSTED_DESKTOP
+
+rm -f "${ROOTFS_MNT}/home/chaos/.local/share/applications/front-camera-preview.desktop"
 
 chroot "${ROOTFS_MNT}" chown -R chaos:chaos \
     /home/chaos/.local/bin/front-camera-preview.sh \
-    /home/chaos/.local/share/applications/front-camera-preview.desktop || true
+    /home/chaos/.local/share/applications/front-camera-preview-natural.desktop \
+    /home/chaos/.local/share/applications/front-camera-preview-boosted.desktop || true
 
 # Force RK817 into a stable capture profile after PipeWire is ready.
 echo "[*] Installing RK817 pro-audio profile helper..."
@@ -2639,6 +2679,41 @@ if [ -f "${ROOT_DIR}/overlay/camera-isp-setup.sh" ] && \
     cp "${ROOT_DIR}/overlay/camera-isp-setup.service" "${ROOTFS_MNT}/etc/systemd/system/camera-isp-setup.service"
     chroot "${ROOTFS_MNT}" systemctl enable camera-isp-setup.service
 fi
+
+# 10b-awb. ISP AWB gain feeder (rkisp1-awb) — provides color to s5k5e8 front camera
+# The rkisp_v8 vendor ISP defaults to zero AWB gains (monochrome output).
+# rkisp1-awb feeds R/Gr/Gb/B gain params per-frame via /dev/video28.
+if [ -f "${ROOT_DIR}/tools/rkisp1_awb.c" ] && command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    echo "[*] Compiling rkisp1-awb AWB gain feeder..."
+    aarch64-linux-gnu-gcc -O2 -o "${ROOTFS_MNT}/usr/local/bin/rkisp1-awb" \
+        "${ROOT_DIR}/tools/rkisp1_awb.c" && \
+        echo "[*] rkisp1-awb compiled for arm64" || \
+        echo "[!] Warning: rkisp1-awb compilation failed — front camera will show monochrome"
+fi
+
+# Install rkisp1-awb as a user service that runs alongside rkcam-webcam
+mkdir -p "${ROOTFS_MNT}/home/chaos/.config/systemd/user/rkcam-webcam.service.wants"
+cat > "${ROOTFS_MNT}/home/chaos/.config/systemd/user/rkisp1-awb.service" << 'RKISP1_AWB_UNIT'
+[Unit]
+Description=RkISP1 AWB gain feeder for front camera (s5k5e8)
+After=rkcam-webcam.service
+BindsTo=rkcam-webcam.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 0.5
+ExecStart=/usr/local/bin/rkisp1-awb 512 256 256 640
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=rkcam-webcam.service
+RKISP1_AWB_UNIT
+ln -sfn /home/chaos/.config/systemd/user/rkisp1-awb.service \
+    "${ROOTFS_MNT}/home/chaos/.config/systemd/user/rkcam-webcam.service.wants/rkisp1-awb.service"
+chroot "${ROOTFS_MNT}" chown -R chaos:chaos \
+    /home/chaos/.config/systemd/user/rkisp1-awb.service \
+    /home/chaos/.config/systemd/user/rkcam-webcam.service.wants || true
 
 # 10b. (removed) rk817-hard-poweroff userspace service was removed.
 # The kernel's rk817_battery_shutdown() now saves dsoc/capacity before
