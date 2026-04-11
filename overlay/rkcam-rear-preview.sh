@@ -4,8 +4,12 @@ set -euo pipefail
 REAR_SETUP="${REAR_SETUP:-/usr/local/bin/setup_isp_rear.sh}"
 FRONT_SETUP="${FRONT_SETUP:-/usr/local/bin/camera-isp-setup.sh}"
 DEVICE="${REAR_PREVIEW_DEVICE:-/dev/video22}"
-W="${REAR_PREVIEW_W:-1920}"
-H="${REAR_PREVIEW_H:-1080}"
+# Use a wider default than 1080p crop.
+W="${REAR_PREVIEW_W:-2592}"
+H="${REAR_PREVIEW_H:-1944}"
+SETUP_W="${REAR_SETUP_W:-$W}"
+SETUP_H="${REAR_SETUP_H:-$H}"
+FOCUS="${REAR_PREVIEW_FOCUS:-64}"
 RESTORE_FRONT="${REAR_PREVIEW_RESTORE_FRONT:-1}"
 LOG_FILE="${REAR_PREVIEW_LOG:-/tmp/rkcam-rear-preview.log}"
 CHECK_ONLY=0
@@ -66,8 +70,9 @@ if [ ! -x "${REAR_SETUP}" ]; then
     exit 1
 fi
 
-log "Switching ISP route to rear camera..."
-if ! bash "${REAR_SETUP}" >/tmp/rkcam-rear-setup.log 2>&1; then
+log "Switching ISP route to rear camera (${SETUP_W}x${SETUP_H}, focus=${FOCUS})..."
+if ! REAR_W="${SETUP_W}" REAR_H="${SETUP_H}" REAR_FOCUS="${FOCUS}" \
+      bash "${REAR_SETUP}" >/tmp/rkcam-rear-setup.log 2>&1; then
     log "ERROR: rear setup failed (see /tmp/rkcam-rear-setup.log)"
     notify_user "Rear Camera Preview" "Rear setup failed. See /tmp/rkcam-rear-setup.log"
     exit 1
