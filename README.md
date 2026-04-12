@@ -97,7 +97,7 @@ python3 convert_qwen_rk3562.py \
 
 ### Benchmark (on tablet, NPU path)
 
-Measured on **April 6, 2026** on `chaos@192.168.2.109` with:
+Measured on **April 6, 2026** on `<tablet-ip>` with:
 - prompt: `Output exactly 300 English words about arithmetic speed testing do not include punctuation and do not stop early`
 - `MAX_NEW_TOKENS=64`, `MAX_CONTEXT_LEN=1024`
 - runner: `~/npu-test/xcompile/demo_Linux_aarch64/run_llm_rk3562.sh`
@@ -226,7 +226,7 @@ These variables can be set before running `build.sh` to control build behaviour:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RKDEBIAN_FORCE_CLEAN_ROOTFS` | `0` | Set to `1` to wipe and fully rebuild the Debian rootfs from scratch. Useful when switching between different image profiles (for example gaming/retro vs desktop) so stale packages do not carry over. |
+| `RKDEBIAN_FORCE_CLEAN_ROOTFS` | `0` | Set to `1` to wipe and fully rebuild the Debian rootfs from scratch. Useful when switching between different image profiles so stale packages do not carry over. |
 | `ROOTFS_IMAGE_SIZE` | `auto` | Override the rootfs partition size (e.g. `4G`, `3584M`). By default the size is calculated automatically from actual rootfs usage plus headroom. |
 | `ROOTFS_HEADROOM_MB` | `512` | Free space headroom added on top of actual rootfs usage when using `auto` sizing. |
 | `ROOTFS_MIN_MB` | `2560` | Minimum rootfs image size in MiB when using `auto` sizing. |
@@ -382,6 +382,23 @@ Remove the SD card to return to Android.
 
 ---
 
+## Default Credentials
+
+The build system creates the following accounts in the Debian image:
+
+| Account | Username | Password | Notes |
+|---------|----------|----------|-------|
+| Standard user | `chaos` | `chaos` | Passwordless sudo |
+| Root | `root` | `root` | Direct root login |
+
+> **Change these on first boot:**
+> ```bash
+> passwd                   # change chaos password
+> sudo passwd root         # change root password
+> ```
+
+---
+
 ## Image Layout
 
 The SD card image uses a GPT partition table:
@@ -405,11 +422,21 @@ rkdebian/
 ├── build_rootfs.sh       # Debian rootfs builder (debootstrap + chroot)
 ├── genimage.cfg          # SD card image partition layout
 ├── extlinux.conf         # Bootloader config (kernel + DTB)
-├── overlay/              # Custom kernel drivers, DTS, firmware
-│   └── drivers/net/wireless/ea6621q/   # Seekwave Wi-Fi/BT driver
-├── src/                  # Cloned sources (kernel, u-boot, rkbin)
+├── splash.png            # Boot splash screen
+├── overlay/              # Custom kernel drivers, DTS, firmware, and services
+│   ├── arch/             # Device tree sources (DTS/DTSI)
+│   ├── drivers/          # Out-of-tree kernel drivers (Wi-Fi EA6621Q, cameras, PMIC)
+│   ├── firmware/         # Wi-Fi firmware blobs (Seekwave EA6621Q)
+│   ├── kernel-patches/   # Kernel patches applied during build
+│   └── etc/              # On-device config overrides (logind, etc.)
+├── debs/                 # Pre-built .deb packages (Mali GPU, Rockchip MPP)
+├── mali/                 # Mali GPU userspace library (.so)
+├── wifi/                 # Wi-Fi firmware, vendor SDK, and porting guides
+├── tools/                # On-device camera capture and ISP diagnostic tools
+├── docs/                 # Design specs and build notes
+├── src/                  # Cloned sources (kernel, u-boot, rkbin) — populated by build
 ├── out/                  # Build artifacts (kernel, rootfs, images)
-└── output/update/        # Final flashable image + update package
+└── output/update/        # Final flashable image + OTA update package
 ```
 
 ---
