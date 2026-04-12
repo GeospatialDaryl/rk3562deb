@@ -442,13 +442,13 @@ These binaries are provided by those projects under their respective terms. ARM 
 
 The Rockchip MPP packages in `debs/` (`librockchip-mpp1`, `librockchip-mpp-dev`, `librockchip-vpu0`) are sourced from:
 
-- [christianhaitian/rk3566_core_builds](https://github.com/christianhaitian/rk3566_core_builds/tree/master/mali/aarch64)
+- [rockchip-linux/mpp](https://github.com/rockchip-linux/mpp)
 
 Rockchip MPP is licensed under the Apache 2.0 License.
 
 ### Seekwave Wi-Fi / Bluetooth
 
-The Wi-Fi and Bluetooth driver source in `overlay/drivers/net/wireless/ea6621q/` and firmware blobs in `overlay/firmware/` and `wifi/` are provided by **Seekwave Technology Co. Ltd** (重庆希微科技有限公司). The driver is open-sourced by the vendor.
+The Wi-Fi and Bluetooth driver source in `overlay/drivers/net/wireless/ea6621q/` and firmware blobs in `overlay/firmware/` and `wifi/` are provided by **Seekwave Technology Co. Ltd**. The driver is released by the vendor under the GNU General Public License v2.0 (GPL-2.0).
 
 ---
 
