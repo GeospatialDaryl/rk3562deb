@@ -25,6 +25,24 @@
 		regulator-boot-on;
 		enable-active-high;
 	};
+
+	/*
+	 * Rear camera flashlight exposed as an LED-class device so Phosh's
+	 * built-in torch quick-setting can discover and control it.
+	 * GPIO mapping matches userspace-verified GPIO114 (gpio3 RK_PC2).
+	 */
+	torch_leds: gpio-leds {
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&flashlight_gpio>;
+
+		rear_flash: rear-flash {
+			label = "camera:flash";
+			gpios = <&gpio3 RK_PC2 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+			linux,default-trigger = "none";
+		};
+	};
 };
 
 &csi2_dphy0 {
@@ -476,6 +494,11 @@
 			rockchip,pins =
 				/* camera power en */
 				<3 RK_PB3 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		flashlight_gpio: flashlight-gpio {
+			rockchip,pins =
+				<3 RK_PC2 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 };

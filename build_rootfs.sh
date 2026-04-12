@@ -169,6 +169,7 @@ apt-get install -y sudo curl wget nano vim openssh-server network-manager wpasup
     udev evtest pciutils usbutils \
     xinput libinput-tools \
     python3 python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
+    python3-evdev \
     qt6-wayland \
     i2c-tools \
     iproute2 iputils-ping dnsutils locales tzdata upower power-profiles-daemon brightnessctl rfkill \
@@ -382,15 +383,22 @@ cat > /etc/dconf/db/local.d/20-rkdebian-phosh-wwan << 'PHOSH_WWAN_DCONF'
 wwan-backend='ofono'
 PHOSH_WWAN_DCONF
 
-# Phosh 0.24 lockscreen forces portrait orientation internally.
-# Keep screen blanking but disable lockscreen to avoid portrait-only wake/login.
+# Keep lockscreen enabled by default.
+# (Older images disabled it as a temporary portrait-workaround.)
 cat > /etc/dconf/db/local.d/21-rkdebian-phosh-lockscreen << 'PHOSH_LOCK_DCONF'
 [org/gnome/desktop/screensaver]
-lock-enabled=false
+lock-enabled=true
 
 [org/gnome/desktop/lockdown]
-disable-lock-screen=true
+disable-lock-screen=false
 PHOSH_LOCK_DCONF
+
+# Let rk-powerkey-longpress service own power-button behavior.
+# GSD default ('suspend') acts on key press; we need release-based handling.
+cat > /etc/dconf/db/local.d/22-rkdebian-power-button << 'PHOSH_POWERKEY_DCONF'
+[org/gnome/settings-daemon/plugins/power]
+power-button-action='nothing'
+PHOSH_POWERKEY_DCONF
 dconf update >/dev/null 2>&1 || true
 
 # Automatically power adapters when bluetoothd starts.
@@ -1185,12 +1193,14 @@ OUTPUT_NAME="${OUTPUT_NAME:-DSI-1}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 LOG_FILE="$RUNTIME_DIR/phosh-autorotate.log"
 STATE_FILE="$RUNTIME_DIR/phosh-autorotate.state"
+PRELOCK_FILE="$RUNTIME_DIR/phosh-autorotate.prelock"
 AXIS_FILE="${AXIS_FILE:-/sys/devices/virtual/input/input2/axis_data}"
 # Ignore near-flat/noisy readings.
 AXIS_MIN="${AXIS_MIN:-260}"
 DOMINANCE_MARGIN="${DOMINANCE_MARGIN:-180}"
 STABLE_POLLS="${STABLE_POLLS:-3}"
 POLL_INTERVAL="${POLL_INTERVAL:-0.25}"
+LOCKSCREEN_POLL_DIV="${LOCKSCREEN_POLL_DIV:-4}"
 # X-axis sign mapping for landscape; tuned for this panel.
 X_POS_TRANSFORM="${X_POS_TRANSFORM:-90}"
 X_NEG_TRANSFORM="${X_NEG_TRANSFORM:-270}"
@@ -1198,7 +1208,9 @@ STARTUP_SETTLE_SEC="${STARTUP_SETTLE_SEC:-2}"
 LANDSCAPE_PRIME_ON_STARTUP="${LANDSCAPE_PRIME_ON_STARTUP:-1}"
 LANDSCAPE_PRIME_DELAY="${LANDSCAPE_PRIME_DELAY:-0.20}"
 RESYNC_POLLS="${RESYNC_POLLS:-20}"
-DISPLAYCONFIG_ENABLED="${DISPLAYCONFIG_ENABLED:-1}"
+# D-Bus DisplayConfig can intermittently fail on this tablet/Phosh combo.
+# Keep wlr-randr as default, while allowing opt-in via env.
+DISPLAYCONFIG_ENABLED="${DISPLAYCONFIG_ENABLED:-0}"
 DISPLAYCONFIG_DEST="${DISPLAYCONFIG_DEST:-sm.puri.Phosh.Portal}"
 DISPLAYCONFIG_PATH="${DISPLAYCONFIG_PATH:-/org/gnome/Mutter/DisplayConfig}"
 DISPLAYCONFIG_IFACE="${DISPLAYCONFIG_IFACE:-org.gnome.Mutter.DisplayConfig}"
@@ -1221,6 +1233,16 @@ orientation_locked() {
   local v
   v="$(gsettings get org.gnome.settings-daemon.peripherals.touchscreen orientation-lock 2>/dev/null || echo false)"
   [[ "$v" == "true" ]]
+}
+
+lockscreen_active() {
+  command -v gdbus >/dev/null 2>&1 || return 1
+  local v
+  v="$(gdbus call --session \
+    --dest org.gnome.ScreenSaver \
+    --object-path /org/gnome/ScreenSaver \
+    --method org.gnome.ScreenSaver.GetActive 2>/dev/null || true)"
+  [[ "$v" == *"true"* ]]
 }
 
 can_use_displayconfig() {
@@ -1319,20 +1341,19 @@ current_transform() {
   wlr-randr 2>/dev/null | awk '/Transform:/ {print $2; exit}' || true
 }
 
+output_enabled() {
+  wlr-randr 2>/dev/null | awk -v out="$OUTPUT_NAME" '
+    $1 == out { in_output=1; next }
+    in_output && /Enabled:/ { print $2; exit }
+  ' | grep -q '^yes$'
+}
+
 apply_transform() {
   local transform="$1"
+  local force="${2:-0}"
   [[ -n "$transform" ]] || return 0
 
-  if orientation_locked; then
-    return 0
-  fi
-
-  local last=""
-  if [[ -f "$STATE_FILE" ]]; then
-    last="$(cat "$STATE_FILE" 2>/dev/null || true)"
-  fi
-
-  if [[ "$last" == "$transform" ]]; then
+  if [[ "$force" != "1" ]] && orientation_locked; then
     return 0
   fi
 
@@ -1340,6 +1361,14 @@ apply_transform() {
   current="$(current_transform)"
   if [[ -n "$current" && "$current" == "$transform" ]]; then
     printf '%s' "$transform" > "$STATE_FILE"
+    return 0
+  fi
+
+  local last=""
+  if [[ -f "$STATE_FILE" ]]; then
+    last="$(cat "$STATE_FILE" 2>/dev/null || true)"
+  fi
+  if [[ "$force" != "1" && "$last" == "$transform" ]]; then
     return 0
   fi
 
@@ -1358,8 +1387,10 @@ apply_transform() {
       log "applied transform=$transform backend=displayconfig"
       return 0
     fi
-    log "displayconfig apply failed transform=$transform"
-    return 0
+    # DisplayConfig state can be transiently invalid on lock/wake;
+    # fail over so rotation never gets stuck.
+    use_displayconfig=0
+    log "displayconfig apply failed transform=$transform; falling back to wlr-randr"
   fi
 
   if wlr-randr --output "$OUTPUT_NAME" --transform "$transform" >/dev/null 2>&1; then
@@ -1431,6 +1462,7 @@ fi
 
 # Seed state from compositor so we do not force-rotate on startup.
 printf '%s' "$(current_transform)" > "$STATE_FILE" 2>/dev/null || true
+cp -f "$STATE_FILE" "$PRELOCK_FILE" 2>/dev/null || true
 log "starting raw-axis autorotate output=$OUTPUT_NAME wayland=$WAYLAND_DISPLAY axis=$AXIS_FILE"
 if [[ "${STARTUP_SETTLE_SEC}" != "0" ]]; then
   sleep "$STARTUP_SETTLE_SEC"
@@ -1439,12 +1471,48 @@ fi
 pending=""
 pending_count=0
 last_lock_state=""
+lockscreen_state="false"
+last_lockscreen_state=""
+prelock_transform="$(cat "$PRELOCK_FILE" 2>/dev/null || true)"
 startup_prime_done=0
 loop_count=0
 
 while true; do
   loop_count=$((loop_count + 1))
-  if (( RESYNC_POLLS > 0 )) && (( loop_count % RESYNC_POLLS == 0 )); then
+  if (( LOCKSCREEN_POLL_DIV <= 1 )) || (( loop_count % LOCKSCREEN_POLL_DIV == 0 )); then
+    if lockscreen_active; then
+      lockscreen_state="true"
+    else
+      lockscreen_state="false"
+    fi
+
+    if [[ "$lockscreen_state" != "$last_lockscreen_state" ]]; then
+      log "lockscreen-active=$lockscreen_state"
+      if [[ "$lockscreen_state" == "true" ]]; then
+        prelock_transform="$(cat "$STATE_FILE" 2>/dev/null || true)"
+        if [[ -z "$prelock_transform" ]]; then
+          prelock_transform="$(current_transform)"
+        fi
+        if [[ -n "$prelock_transform" ]]; then
+          printf '%s' "$prelock_transform" > "$PRELOCK_FILE" 2>/dev/null || true
+          log "saved prelock-transform=$prelock_transform"
+        fi
+      fi
+      last_lockscreen_state="$lockscreen_state"
+    fi
+
+    if [[ "$lockscreen_state" == "true" ]]; then
+      if [[ -z "$prelock_transform" ]]; then
+        prelock_transform="$(cat "$PRELOCK_FILE" 2>/dev/null || true)"
+      fi
+      if [[ -n "$prelock_transform" ]] && output_enabled; then
+        apply_transform "$prelock_transform" 1
+      fi
+    fi
+  fi
+
+  if (( RESYNC_POLLS > 0 )) && (( loop_count % RESYNC_POLLS == 0 )) &&
+     [[ "$lockscreen_state" != "true" ]]; then
     current="$(current_transform)"
     if [[ -n "$current" ]]; then
       printf '%s' "$current" > "$STATE_FILE" 2>/dev/null || true
@@ -1473,7 +1541,11 @@ while true; do
       fi
 
       if (( pending_count >= STABLE_POLLS )); then
-        apply_transform "$candidate"
+        if [[ "$lockscreen_state" != "true" ]]; then
+          prelock_transform="$candidate"
+          printf '%s' "$prelock_transform" > "$PRELOCK_FILE" 2>/dev/null || true
+          apply_transform "$candidate"
+        fi
       fi
     else
       pending=""
@@ -1715,7 +1787,6 @@ chroot "${ROOTFS_MNT}" chown chaos:chaos \
 # These either belong to other desktops (XFCE/GNOME) or are optional daemons
 # that cost responsiveness on this tablet.
 PHOSH_DISABLE_AUTOSTARTS="
-ayatana-indicator-application.desktop
 blueman.desktop
 geoclue-demo-agent.desktop
 kup-daemon.desktop
@@ -1728,6 +1799,13 @@ xfce4-notifyd.desktop
 xfce4-power-manager.desktop
 xfsettingsd.desktop
 "
+
+# Remove stale per-user overrides/legacy flashlight tray autostarts from
+# earlier builds that used AppIndicator.
+rm -f \
+    "${ROOTFS_MNT}/home/chaos/.config/autostart/ayatana-indicator-application.desktop" \
+    "${ROOTFS_MNT}/home/chaos/.config/autostart/rk-indicator-host.desktop" \
+    "${ROOTFS_MNT}/home/chaos/.config/autostart/rk-flashlight-indicator.desktop"
 
 for desktop in ${PHOSH_DISABLE_AUTOSTARTS}; do
 cat > "${ROOTFS_MNT}/home/chaos/.config/autostart/${desktop}" << 'AUTOSTART_HIDE'
@@ -1940,6 +2018,13 @@ if [ -f "${ROOT_DIR}/overlay/rkcam-rear-preview.sh" ] && \
         /home/chaos/Desktop/Rear-Camera-Preview.desktop || true
 fi
 
+# Remove deprecated lantern app leftovers from reused base rootfs images.
+rm -f \
+    "${ROOTFS_MNT}/home/chaos/.local/bin/rk-lantern.sh" \
+    "${ROOTFS_MNT}/home/chaos/.local/bin/rk-lantern-screen.py" \
+    "${ROOTFS_MNT}/home/chaos/.local/share/applications/rk-lantern.desktop" \
+    "${ROOTFS_MNT}/home/chaos/Desktop/Lantern.desktop"
+
 # Force RK817 into a stable capture profile after PipeWire is ready.
 echo "[*] Installing RK817 pro-audio profile helper..."
 cat > "${ROOTFS_MNT}/home/chaos/.local/bin/rk-audio-pro.sh" << 'RK_AUDIO_PRO'
@@ -2069,13 +2154,305 @@ chroot "${ROOTFS_MNT}" chown -R chaos:chaos \
     /home/chaos/.local/bin/firefox-pwcam \
     /home/chaos/.local/share/applications || true
 
-# Power key: short press = suspend, long press = poweroff
+# Power key behavior is handled by rk-powerkey-longpress service:
+# - short press (<3s): suspend on key release
+# - long press (>=3s): show standard GNOME session shutdown dialog
+# logind handling is disabled to avoid conflicting immediate suspend.
 mkdir -p "${ROOTFS_MNT}/etc/systemd/logind.conf.d"
 cat > "${ROOTFS_MNT}/etc/systemd/logind.conf.d/power-button.conf" << 'LOGIND'
 [Login]
-HandlePowerKey=suspend
-HandlePowerKeyLongPress=poweroff
+HandlePowerKey=ignore
+HandlePowerKeyLongPress=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
 LOGIND
+
+echo "[*] Installing long-press power key handler..."
+mkdir -p "${ROOTFS_MNT}/usr/local/sbin"
+cat > "${ROOTFS_MNT}/usr/local/sbin/rk-powerkey-longpress.py" << 'RK_POWERKEY_LONGPRESS'
+#!/usr/bin/env python3
+"""Handle hardware power-key short/long press actions for Phosh."""
+
+import os
+import pwd
+import subprocess
+import sys
+import time
+
+from evdev import InputDevice, ecodes, list_devices
+
+
+LONG_PRESS_SECONDS = float(os.environ.get("RK_POWERKEY_LONGPRESS_SECONDS", "3.0"))
+TARGET_USER = os.environ.get("RK_POWERKEY_USER", "chaos")
+SCAN_INTERVAL_SECONDS = 2.0
+TRIGGER_COOLDOWN_SECONDS = 2.0
+MIN_PRESS_SECONDS = float(os.environ.get("RK_POWERKEY_MIN_PRESS_SECONDS", "0.12"))
+RELEASE_SETTLE_SECONDS = float(
+    os.environ.get("RK_POWERKEY_RELEASE_SETTLE_SECONDS", "0.20")
+)
+SUSPEND_COOLDOWN_SECONDS = float(
+    os.environ.get("RK_POWERKEY_SUSPEND_COOLDOWN_SECONDS", "2.0")
+)
+last_device_summary = None
+
+
+def log(msg):
+    print(f"rk-powerkey: {msg}", flush=True)
+
+
+def load_target_user():
+    entry = pwd.getpwnam(TARGET_USER)
+    uid = entry.pw_uid
+    runtime_dir = f"/run/user/{uid}"
+    bus = f"unix:path={runtime_dir}/bus"
+    return uid, runtime_dir, bus
+
+
+def list_power_devices():
+    global last_device_summary
+    preferred = {}
+    fallback = {}
+    all_devs = []
+    for path in list_devices():
+        try:
+            dev = InputDevice(path)
+            all_devs.append(dev)
+            caps = dev.capabilities().get(ecodes.EV_KEY, [])
+            if ecodes.KEY_POWER not in caps:
+                dev.close()
+                continue
+
+            name = (dev.name or "").lower()
+            if "bt-powerkey" in name:
+                dev.close()
+                continue
+
+            if (
+                "rk805 pwrkey" in name
+                or "rk8" in name
+                or "pwrkey" in name
+                or "gpio-keys" in name
+            ):
+                preferred[path] = dev
+            else:
+                fallback[path] = dev
+        except OSError:
+            continue
+
+    devices = preferred if preferred else fallback
+    for dev in all_devs:
+        path = dev.path
+        if path not in devices:
+            try:
+                dev.close()
+            except OSError:
+                pass
+
+    for dev in devices.values():
+        try:
+            dev.grab()
+        except OSError:
+            pass
+
+    summary = ", ".join(f"{p}:{d.name}" for p, d in sorted(devices.items()))
+    if summary != last_device_summary:
+        log(f"watching devices: {summary or 'none'}")
+        last_device_summary = summary
+    return devices
+
+
+def has_phosh_session(uid):
+    result = subprocess.run(
+        ["/usr/bin/pgrep", "-u", str(uid), "-f", "/usr/libexec/phosh"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def trigger_shutdown_dialog(uid, runtime_dir, bus):
+    if not os.path.exists(f"{runtime_dir}/bus"):
+        return False
+    if not has_phosh_session(uid):
+        return False
+
+    cmd = [
+        "/usr/sbin/runuser",
+        "-u",
+        TARGET_USER,
+        "--",
+        "/usr/bin/env",
+        f"XDG_RUNTIME_DIR={runtime_dir}",
+        f"DBUS_SESSION_BUS_ADDRESS={bus}",
+        "/usr/bin/gdbus",
+        "call",
+        "--session",
+        "--dest",
+        "org.gnome.SessionManager",
+        "--object-path",
+        "/org/gnome/SessionManager",
+        "--method",
+        "org.gnome.SessionManager.Shutdown",
+    ]
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=8,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def trigger_suspend():
+    subprocess.run(
+        ["/usr/bin/systemctl", "suspend"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+
+
+def main():
+    try:
+        uid, runtime_dir, bus = load_target_user()
+    except KeyError:
+        return 0
+
+    power_down_at = None
+    power_down_dev = None
+    long_fired = False
+    pending_suspend_at = None
+    last_trigger = 0.0
+    last_suspend = 0.0
+
+    while True:
+        devices = list_power_devices()
+        if not devices:
+            time.sleep(SCAN_INTERVAL_SECONDS)
+            continue
+
+        try:
+            next_rescan = time.monotonic() + SCAN_INTERVAL_SECONDS
+            while True:
+                event_seen = False
+                for path, dev in list(devices.items()):
+                    try:
+                        event = dev.read_one()
+                    except OSError:
+                        event = None
+                    if event is None:
+                        continue
+                    event_seen = True
+                    if event.type != ecodes.EV_KEY or event.code != ecodes.KEY_POWER:
+                        continue
+
+                    now = time.monotonic()
+                    if event.value == 1:
+                        # Ignore duplicate key-down repeats from same device.
+                        if power_down_at is None:
+                            power_down_at = now
+                            power_down_dev = path
+                            long_fired = False
+                            pending_suspend_at = None
+                            log(f"power down from {path}")
+                    elif event.value == 0:
+                        if power_down_at is not None and (
+                            power_down_dev is None or path == power_down_dev
+                        ):
+                            held = now - power_down_at
+                            if long_fired:
+                                log(f"power up after long press ({held:.2f}s)")
+                            elif held >= MIN_PRESS_SECONDS:
+                                pending_suspend_at = now + RELEASE_SETTLE_SECONDS
+                                log(
+                                    f"power up after short press ({held:.2f}s), "
+                                    "suspend pending"
+                                )
+                            else:
+                                log(f"ignored bounce release ({held:.3f}s)")
+                        power_down_at = None
+                        power_down_dev = None
+                        long_fired = False
+
+                now = time.monotonic()
+                if power_down_at is not None and not long_fired:
+                    held = now - power_down_at
+                    if held >= LONG_PRESS_SECONDS:
+                        long_fired = True
+                        pending_suspend_at = None
+                        if (now - last_trigger) >= TRIGGER_COOLDOWN_SECONDS:
+                            ok = trigger_shutdown_dialog(uid, runtime_dir, bus)
+                            if ok:
+                                last_trigger = now
+                                log(f"long press action fired ({held:.2f}s)")
+                            else:
+                                log("long press detected but shutdown dialog failed")
+
+                if (
+                    pending_suspend_at is not None
+                    and power_down_at is None
+                    and now >= pending_suspend_at
+                ):
+                    pending_suspend_at = None
+                    if (now - last_suspend) >= SUSPEND_COOLDOWN_SECONDS:
+                        trigger_suspend()
+                        last_suspend = now
+                        log("short press action fired (suspend)")
+                    else:
+                        log("suspend suppressed by cooldown")
+
+                if not event_seen:
+                    time.sleep(0.05)
+
+                # Re-scan periodically so we survive input-node churn.
+                if (
+                    time.monotonic() >= next_rescan
+                    and power_down_at is None
+                    and pending_suspend_at is None
+                ):
+                    break
+        finally:
+            for dev in devices.values():
+                try:
+                    dev.ungrab()
+                except OSError:
+                    pass
+                try:
+                    dev.close()
+                except OSError:
+                    pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+RK_POWERKEY_LONGPRESS
+chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-powerkey-longpress.py"
+
+cat > "${ROOTFS_MNT}/etc/systemd/system/rk-powerkey-longpress.service" << 'RK_POWERKEY_LONGPRESS_UNIT'
+[Unit]
+Description=Show shutdown dialog on long power-key press
+After=systemd-user-sessions.service
+Wants=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rk-powerkey-longpress.py
+Restart=always
+RestartSec=1s
+
+[Install]
+WantedBy=multi-user.target
+RK_POWERKEY_LONGPRESS_UNIT
+
+mkdir -p "${ROOTFS_MNT}/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/rk-powerkey-longpress.service \
+    "${ROOTFS_MNT}/etc/systemd/system/multi-user.target.wants/rk-powerkey-longpress.service"
 
 echo "[*] Adding polkit rule for backlight control..."
 mkdir -p "${ROOTFS_MNT}/etc/polkit-1/rules.d"
@@ -2685,6 +3062,167 @@ if __name__ == "__main__":
     main()
 RK_SCREEN_ROTATE
 chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-screen-rotate.py"
+
+# Use native Phosh torch quick-setting support (Phosh 0.24+).
+# The kernel DT exposes the rear flashlight as an LED-class device (:flash),
+# so Phosh discovers it automatically in the top menu.
+# Remove legacy AppIndicator helpers from reused rootfs trees.
+rm -f \
+    "${ROOTFS_MNT}/usr/local/bin/rk-indicator-host.sh" \
+    "${ROOTFS_MNT}/usr/local/bin/rk-flashlight-indicator.py" \
+    "${ROOTFS_MNT}/etc/xdg/autostart/rk-indicator-host.desktop" \
+    "${ROOTFS_MNT}/etc/xdg/autostart/rk-flashlight-indicator.desktop"
+
+echo "[*] Installing flashlight control helper..."
+mkdir -p "${ROOTFS_MNT}/usr/local/sbin"
+
+cat > "${ROOTFS_MNT}/usr/local/sbin/rk-flashlightctl" << 'RK_FLASHLIGHT_CTL'
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+LED_NAME="${FLASHLIGHT_LED_NAME:-camera:flash}"
+LED_DIR="/sys/class/leds/${LED_NAME}"
+
+GPIO="${FLASHLIGHT_GPIO:-114}"
+GPIO_DIR="/sys/class/gpio/gpio${GPIO}"
+EXPORT="/sys/class/gpio/export"
+UNEXPORT="/sys/class/gpio/unexport"
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "rk-flashlightctl must run as root" >&2
+        exit 1
+    fi
+}
+
+ensure_exported() {
+    if [ -d "${GPIO_DIR}" ]; then
+        return 0
+    fi
+    echo "${GPIO}" > "${EXPORT}"
+    sleep 0.02
+}
+
+led_present() {
+    [ -d "${LED_DIR}" ] && [ -r "${LED_DIR}/max_brightness" ] && [ -r "${LED_DIR}/brightness" ]
+}
+
+led_writable() {
+    led_present && [ -w "${LED_DIR}/brightness" ]
+}
+
+led_max() {
+    cat "${LED_DIR}/max_brightness" 2>/dev/null || echo 1
+}
+
+led_set_raw() {
+    echo "${1}" > "${LED_DIR}/brightness"
+}
+
+gpio_set_on() {
+    ensure_exported
+    echo out > "${GPIO_DIR}/direction"
+    echo 1 > "${GPIO_DIR}/value"
+}
+
+gpio_set_off() {
+    if [ -d "${GPIO_DIR}" ]; then
+        echo out > "${GPIO_DIR}/direction" 2>/dev/null || true
+        echo 0 > "${GPIO_DIR}/value" 2>/dev/null || true
+        echo "${GPIO}" > "${UNEXPORT}" 2>/dev/null || true
+    fi
+}
+
+set_percent() {
+    p="${1}"
+    case "${p}" in
+        ''|*[!0-9]*)
+            echo "percent must be an integer 0..100" >&2
+            exit 2
+            ;;
+    esac
+    if [ "${p}" -gt 100 ]; then
+        p=100
+    fi
+
+    if led_writable; then
+        max="$(led_max)"
+        v=$(( p * max / 100 ))
+        if [ "${p}" -gt 0 ] && [ "${v}" -eq 0 ]; then
+            v=1
+        fi
+        led_set_raw "${v}"
+    else
+        if [ "${p}" -eq 0 ]; then
+            gpio_set_off
+        else
+            gpio_set_on
+        fi
+    fi
+}
+
+set_off() {
+    set_percent 0
+}
+
+status_now() {
+    if led_present; then
+        v="$(cat "${LED_DIR}/brightness" 2>/dev/null || echo 0)"
+        if [ "${v}" -gt 0 ]; then
+            echo "on"
+            return 0
+        fi
+        echo "off"
+        return 0
+    fi
+
+    if [ -d "${GPIO_DIR}" ] && [ -r "${GPIO_DIR}/value" ]; then
+        v="$(cat "${GPIO_DIR}/value" 2>/dev/null || echo 0)"
+        if [ "${v}" = "1" ]; then
+            echo "on"
+            return 0
+        fi
+    fi
+    echo "off"
+}
+
+main() {
+    case "${1:-}" in
+        on)
+            require_root
+            set_percent 100
+            ;;
+        off)
+            require_root
+            set_off
+            ;;
+        toggle)
+            require_root
+            if [ "$(status_now)" = "on" ]; then
+                set_off
+            else
+                set_percent 100
+            fi
+            ;;
+        set)
+            require_root
+            set_percent "${2:-}"
+            ;;
+        status)
+            status_now
+            ;;
+        *)
+            echo "Usage: $0 {on|off|toggle|set <0-100>|status}" >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "${@:-}"
+RK_FLASHLIGHT_CTL
+chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-flashlightctl"
 
 # Wayland desktop env vars for Phosh sessions.
 cat > "${ROOTFS_MNT}/etc/profile.d/rk-wayland.sh" << 'RK_WAYLAND_PROFILE'
