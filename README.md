@@ -56,7 +56,7 @@ The resulting image is written to an SD card. Insert it and power on — the tab
 |-----|-------|
 | **Firefox ESR** | Preinstalled web browser |
 | **Chromium** | Preinstalled web browser (installed when available on mirror) |
-| **FreeTube** | Installed via Flatpak from Flathub (when available) |
+| **FreeTube** | Optional Flatpak app (disabled by default; enable with `RKDEBIAN_PREINSTALL_FREETUBE=1`) |
 | **Drawing** | Touch-friendly paint app (installed when available on mirror) |
 | **Snapshot** | Camera app (installed when available on mirror) |
 | **Dolphin** | File manager |
@@ -235,6 +235,8 @@ These variables can be set before running `build.sh` to control build behaviour:
 | `RKDEBIAN_GPU_STACK` | `mali` | GPU stack to build for: `mali` (vendor userspace) or `panfrost` (Mesa/Panfrost, no `libmali`). |
 | `RKDEBIAN_CPU_GOVERNOR` | `performance` | Baseline CPU governor used at boot and as the default mapping for Phosh `balanced` mode. |
 | `RKDEBIAN_MALI_GBM_PROVIDER` | `vendor` | Mali-only option: `vendor` keeps `mali/libgbm.so.1` from the blob package (default), `debian` overrides it to Debian `libgbm.so.1` for compatibility testing. |
+| `RKDEBIAN_PREINSTALL_FREETUBE` | `0` | Set to `1` to preinstall FreeTube from Flathub in the image. Keeping `0` significantly reduces image size. |
+| `RKDEBIAN_MINIMIZE_IMAGE` | `0` | Set to `1` for aggressive size reduction (prunes non-English locales plus `/usr/share/doc`, `/usr/share/help`, `/usr/share/man`, `/usr/share/info`, and unused Flatpak objects). |
 
 ### Kernel
 
@@ -284,6 +286,12 @@ RKDEBIAN_CPU_GOVERNOR=schedutil ./build.sh all
 
 # Mali stack with Debian libgbm override (only for compatibility testing)
 RKDEBIAN_MALI_GBM_PROVIDER=debian ./build.sh all --ui-session=phosh --gpu-stack=mali --force-clean-rootfs
+
+# Size-focused build for easier GitHub uploads
+RKDEBIAN_FORCE_CLEAN_ROOTFS=1 RKDEBIAN_MINIMIZE_IMAGE=1 ./build.sh all
+
+# Same, but with FreeTube preinstalled
+RKDEBIAN_FORCE_CLEAN_ROOTFS=1 RKDEBIAN_MINIMIZE_IMAGE=1 RKDEBIAN_PREINSTALL_FREETUBE=1 ./build.sh all
 ```
 
 When changing `RKDEBIAN_UI_SESSION` or `RKDEBIAN_GPU_STACK`, use `--force-clean-rootfs` to avoid stale package carry-over.

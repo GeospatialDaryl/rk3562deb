@@ -19,6 +19,8 @@ RKDEBIAN_CPU_GOVERNOR="${RKDEBIAN_CPU_GOVERNOR:-performance}"
 RKDEBIAN_GPU_STACK="${RKDEBIAN_GPU_STACK:-mali}"
 RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION:-phosh}"
 RKDEBIAN_MALI_GBM_PROVIDER="${RKDEBIAN_MALI_GBM_PROVIDER:-vendor}"
+RKDEBIAN_PREINSTALL_FREETUBE="${RKDEBIAN_PREINSTALL_FREETUBE:-0}"
+RKDEBIAN_MINIMIZE_IMAGE="${RKDEBIAN_MINIMIZE_IMAGE:-0}"
 
 case "${RKDEBIAN_DISPLAY_SERVER}" in
     auto|wayland|x11) ;;
@@ -60,8 +62,24 @@ case "${RKDEBIAN_MALI_GBM_PROVIDER}" in
         ;;
 esac
 
+case "${RKDEBIAN_PREINSTALL_FREETUBE}" in
+    0|1) ;;
+    *)
+        echo "[-] Unsupported RKDEBIAN_PREINSTALL_FREETUBE=${RKDEBIAN_PREINSTALL_FREETUBE} (expected 0 or 1)."
+        exit 1
+        ;;
+esac
+
+case "${RKDEBIAN_MINIMIZE_IMAGE}" in
+    0|1) ;;
+    *)
+        echo "[-] Unsupported RKDEBIAN_MINIMIZE_IMAGE=${RKDEBIAN_MINIMIZE_IMAGE} (expected 0 or 1)."
+        exit 1
+        ;;
+esac
+
 echo "[*] Building Debian 12 Bookworm arm64 rootfs..."
-echo "[*] UI session: ${RKDEBIAN_UI_SESSION} | GPU stack: ${RKDEBIAN_GPU_STACK} | mali libgbm: ${RKDEBIAN_MALI_GBM_PROVIDER}"
+echo "[*] UI session: ${RKDEBIAN_UI_SESSION} | GPU stack: ${RKDEBIAN_GPU_STACK} | mali libgbm: ${RKDEBIAN_MALI_GBM_PROVIDER} | preinstall-freetube: ${RKDEBIAN_PREINSTALL_FREETUBE} | minimize: ${RKDEBIAN_MINIMIZE_IMAGE}"
 
 chroot_cleanup() {
     local mount_path
@@ -271,13 +289,24 @@ if command -v flatpak >/dev/null 2>&1; then
         https://flathub.org/repo/flathub.flatpakrepo || \
             echo "[!] Warning: failed to add Flathub remote."
 
-    # Install FreeTube from Flathub by default when the app is available.
+    # Keep heavy Flatpak apps optional to avoid inflating default image size.
+    RKDEBIAN_PREINSTALL_FREETUBE="${RKDEBIAN_PREINSTALL_FREETUBE:-0}"
     freetube_ref="io.freetubeapp.FreeTube"
-    if flatpak remote-info --system flathub "${freetube_ref}" >/dev/null 2>&1; then
-        flatpak install --system -y --noninteractive flathub "${freetube_ref}" || \
-            echo "[!] Warning: FreeTube Flatpak install failed, skipping."
+    if [ "${RKDEBIAN_PREINSTALL_FREETUBE}" = "1" ]; then
+        if flatpak remote-info --system flathub "${freetube_ref}" >/dev/null 2>&1; then
+            flatpak install --system -y --noninteractive flathub "${freetube_ref}" || \
+                echo "[!] Warning: FreeTube Flatpak install failed, skipping."
+        else
+            echo "[!] Warning: FreeTube Flatpak (${freetube_ref}) not available, skipping."
+        fi
     else
-        echo "[!] Warning: FreeTube Flatpak (${freetube_ref}) not available, skipping."
+        # Reused rootfs trees may still contain old FreeTube installs.
+        if flatpak info --system "${freetube_ref}" >/dev/null 2>&1; then
+            echo "[*] Removing stale FreeTube Flatpak from reused rootfs..."
+            flatpak uninstall --system -y "${freetube_ref}" >/dev/null 2>&1 || true
+            flatpak uninstall --system -y --unused >/dev/null 2>&1 || true
+        fi
+        echo "[*] Skipping FreeTube Flatpak preinstall (RKDEBIAN_PREINSTALL_FREETUBE=0)."
     fi
 fi
 
@@ -435,7 +464,12 @@ if [ ! -f "${ROOTFS_MNT}/tmp/setup_debian.sh" ]; then
     exit 1
 fi
 # Execute chroot setup via bash explicitly to avoid shebang/direct-exec edge cases.
-if ! chroot "${ROOTFS_MNT}" env RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION}" QEMU_RESERVED_VA=0x4000000000 /bin/bash /tmp/setup_debian.sh; then
+if ! chroot "${ROOTFS_MNT}" env \
+    RKDEBIAN_UI_SESSION="${RKDEBIAN_UI_SESSION}" \
+    RKDEBIAN_PREINSTALL_FREETUBE="${RKDEBIAN_PREINSTALL_FREETUBE}" \
+    RKDEBIAN_MINIMIZE_IMAGE="${RKDEBIAN_MINIMIZE_IMAGE}" \
+    QEMU_RESERVED_VA=0x4000000000 \
+    /bin/bash /tmp/setup_debian.sh; then
     echo "[-] Error: chroot setup script failed (/tmp/setup_debian.sh)."
     exit 1
 fi
@@ -4299,6 +4333,21 @@ rm -rf "${ROOTFS_MNT}/var/cache/apt/archives/"* 2>/dev/null || true
 rm -rf "${ROOTFS_MNT}/var/lib/apt/lists/"* 2>/dev/null || true
 rm -rf "${ROOTFS_MNT}/tmp/"* 2>/dev/null || true
 rm -rf "${ROOTFS_MNT}/var/tmp/"* 2>/dev/null || true
+
+# Optional aggressive slimming for release artifacts.
+if [ "${RKDEBIAN_MINIMIZE_IMAGE}" = "1" ]; then
+    echo "[*] Applying minimize profile (locales/docs/help/man pruning)..."
+    chroot "${ROOTFS_MNT}" bash -c '
+        find /usr/share/locale -mindepth 1 -maxdepth 1 \
+            ! -name "en" ! -name "en_*" ! -name "locale.alias" \
+            -exec rm -rf {} + 2>/dev/null || true
+        rm -rf /usr/share/doc/* /usr/share/help/* /usr/share/man/* /usr/share/info/* 2>/dev/null || true
+        if command -v flatpak >/dev/null 2>&1; then
+            flatpak uninstall --system -y --unused >/dev/null 2>&1 || true
+            flatpak repair --system >/dev/null 2>&1 || true
+        fi
+    '
+fi
 
 chroot_cleanup
 trap - EXIT
