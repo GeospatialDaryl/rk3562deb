@@ -3303,23 +3303,31 @@ if [ -r /proc/asound/cards ]; then
 fi
 
 if [ -n "$rk_card" ]; then
-    for path in SPK SPK_HP HP RCV; do
-        /usr/bin/amixer -q -c "$rk_card" cset name='Playback Path' "$path" >/dev/null 2>&1 && break
+    # Program codec route twice to survive late resume register resets.
+    pass=0
+    while [ "$pass" -lt 2 ]; do
+        /usr/bin/amixer -q -c "$rk_card" cset name='Resume Path' ON >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" cset name='Playback Path' OFF >/dev/null 2>&1 || true
+        sleep 1
+        for path in SPK SPK_HP HP RCV; do
+            /usr/bin/amixer -q -c "$rk_card" cset name='Playback Path' "$path" >/dev/null 2>&1 && break
+        done
+        /usr/bin/amixer -q -c "$rk_card" cset name='DAC Playback Volume' 230,230 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'DAC' 230,230 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'HP Output Gain' 3 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" cset name='Speaker Switch' on >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'spk switch' on >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'hp switch' off >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" cset name='Capture MIC Path' 'Main Mic' >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'Main Mic' on >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'Headset Mic' off >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'ADC' 255,255 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'ADC PGA Gain' 15,15 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" sset 'MIC Boost Gain' 3,3 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" cset name='Capture Volume' 192 >/dev/null 2>&1 || true
+        /usr/bin/amixer -q -c "$rk_card" cset name='PCM' 192 >/dev/null 2>&1 || true
+        pass=$((pass + 1))
     done
-    /usr/bin/amixer -q -c "$rk_card" cset name='DAC Playback Volume' 230,230 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'DAC' 230,230 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'HP Output Gain' 3 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" cset name='Speaker Switch' on >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'spk switch' on >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'hp switch' off >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" cset name='Capture MIC Path' 'Main Mic' >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'Main Mic' on >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'Headset Mic' off >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'ADC' 255,255 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'ADC PGA Gain' 15,15 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" sset 'MIC Boost Gain' 3,3 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" cset name='Capture Volume' 192 >/dev/null 2>&1 || true
-    /usr/bin/amixer -q -c "$rk_card" cset name='PCM' 192 >/dev/null 2>&1 || true
 fi
 
 /usr/sbin/alsactl store >/dev/null 2>&1 || true
@@ -3368,7 +3376,6 @@ sink="$(pactl list short sinks 2>/dev/null | awk '$2 ~ /^alsa_output\.platform-r
 if [ -n "${sink}" ]; then
     pactl set-default-sink "${sink}" >/dev/null 2>&1 || true
     pactl set-sink-mute "${sink}" 0 >/dev/null 2>&1 || true
-    pactl set-sink-volume "${sink}" 100% >/dev/null 2>&1 || true
 fi
 
 source="$(pactl list short sources 2>/dev/null | awk '$2 ~ /^alsa_input\.platform-rk817-sound\./ {print $2; exit} $2 ~ /analog-stereo/ && $2 !~ /\.monitor$/ && $2 != "virtual-mic" {print $2; exit}' || true)"
@@ -3377,9 +3384,142 @@ if [ -n "${source}" ]; then
     pactl set-source-mute "${source}" 0 >/dev/null 2>&1 || true
 fi
 
+if [ -x /usr/local/bin/rk-audio-volume-state.sh ]; then
+    /usr/local/bin/rk-audio-volume-state.sh restore >/dev/null 2>&1 || true
+fi
+
 exit 0
 RK_AUDIO_SESSION
 chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-audio-session-fix.sh"
+
+echo "[*] Installing persistent audio volume helper..."
+cat > "${ROOTFS_MNT}/usr/local/bin/rk-audio-volume-state.sh" << 'RK_AUDIO_VOLUME_STATE'
+#!/bin/sh
+set -eu
+
+PATH=/usr/bin:/bin
+
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rk-audio"
+STATE_FILE="${STATE_DIR}/volume.env"
+
+get_sink() {
+    pactl list short sinks 2>/dev/null | awk '
+        $2 ~ /^alsa_output\.platform-rk817-sound\./ && $2 !~ /\.monitor$/ {print $2; exit}
+        $2 ~ /analog-stereo/ && $2 !~ /\.monitor$/ {print $2; exit}
+    ' || true
+}
+
+wait_ready() {
+    i=0
+    while [ "${i}" -lt 20 ]; do
+        if pactl info >/dev/null 2>&1; then
+            sink="$(get_sink)"
+            [ -n "${sink}" ] && return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+save_state() {
+    sink="${1:-$(get_sink)}"
+    [ -n "${sink}" ] || return 0
+
+    volume="$(pactl get-sink-volume "${sink}" 2>/dev/null | awk '/Volume:/ {for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+%$/) {print $i; exit}}' || true)"
+    mute="$(pactl get-sink-mute "${sink}" 2>/dev/null | awk '{print $2; exit}' || true)"
+    [ -n "${volume}" ] || return 0
+
+    mkdir -p "${STATE_DIR}"
+    tmp="${STATE_FILE}.tmp"
+    {
+        printf 'VOLUME=%s\n' "${volume}"
+        printf 'MUTE=%s\n' "${mute:-no}"
+    } > "${tmp}"
+    mv "${tmp}" "${STATE_FILE}"
+}
+
+restore_state() {
+    [ -r "${STATE_FILE}" ] || return 0
+    # shellcheck source=/dev/null
+    . "${STATE_FILE}" || return 0
+
+    sink="$(get_sink)"
+    [ -n "${sink}" ] || return 0
+
+    case "${VOLUME:-}" in
+        ''|*[!0-9%]*)
+            ;;
+        *)
+            pactl set-sink-volume "${sink}" "${VOLUME}" >/dev/null 2>&1 || true
+            ;;
+    esac
+
+    case "${MUTE:-}" in
+        yes|no)
+            pactl set-sink-mute "${sink}" "${MUTE}" >/dev/null 2>&1 || true
+            ;;
+    esac
+}
+
+monitor_state() {
+    while :; do
+        pactl subscribe 2>/dev/null | while IFS= read -r line; do
+            case "${line}" in
+                *" on sink "*|*" on server "*|*" on card "*)
+                    save_state
+                    ;;
+            esac
+        done
+        sleep 1
+    done
+}
+
+mode="${1:-monitor}"
+case "${mode}" in
+    restore)
+        wait_ready >/dev/null 2>&1 || exit 0
+        restore_state
+        ;;
+    save)
+        wait_ready >/dev/null 2>&1 || exit 0
+        save_state
+        ;;
+    monitor)
+        wait_ready >/dev/null 2>&1 || exit 0
+        restore_state
+        save_state
+        monitor_state
+        ;;
+    *)
+        echo "Usage: $0 {restore|save|monitor}" >&2
+        exit 2
+        ;;
+esac
+
+exit 0
+RK_AUDIO_VOLUME_STATE
+chmod +x "${ROOTFS_MNT}/usr/local/bin/rk-audio-volume-state.sh"
+
+mkdir -p "${ROOTFS_MNT}/etc/systemd/user" \
+         "${ROOTFS_MNT}/etc/systemd/user/default.target.wants"
+cat > "${ROOTFS_MNT}/etc/systemd/user/rk-audio-volume-state.service" << 'RK_AUDIO_VOLUME_STATE_UNIT'
+[Unit]
+Description=Persist audio sink volume and mute state
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rk-audio-volume-state.sh monitor
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+RK_AUDIO_VOLUME_STATE_UNIT
+ln -sf /etc/systemd/user/rk-audio-volume-state.service \
+    "${ROOTFS_MNT}/etc/systemd/user/default.target.wants/rk-audio-volume-state.service"
 
 cat > "${ROOTFS_MNT}/etc/xdg/autostart/rk-audio-session-fix.desktop" << 'RK_AUDIO_SESSION_DESKTOP'
 [Desktop Entry]
@@ -3390,6 +3530,198 @@ OnlyShowIn=Phosh;GNOME;
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 RK_AUDIO_SESSION_DESKTOP
+
+# Recover audio stack after suspend/resume. Some RK817 + PipeWire sessions
+# come back without a valid default sink until card/profile routing is reapplied.
+echo "[*] Installing suspend/resume audio recovery hook..."
+cat > "${ROOTFS_MNT}/usr/local/sbin/rk-audio-resume.sh" << 'RK_AUDIO_RESUME'
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+TARGET_USER="${RK_AUDIO_USER:-chaos}"
+LOG_FILE="/var/log/rk-audio-resume.log"
+CARD_NAME="alsa_card.platform-rk817-sound"
+
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "${LOG_FILE}"
+}
+
+run_as_user() {
+    uid="$(id -u "${TARGET_USER}" 2>/dev/null || true)"
+    [ -n "${uid}" ] || return 1
+
+    runtime_dir="/run/user/${uid}"
+    [ -S "${runtime_dir}/bus" ] || return 1
+
+    dbus_addr="unix:path=${runtime_dir}/bus"
+    /usr/sbin/runuser -u "${TARGET_USER}" -- /usr/bin/env \
+        XDG_RUNTIME_DIR="${runtime_dir}" \
+        DBUS_SESSION_BUS_ADDRESS="${dbus_addr}" \
+        "$@"
+}
+
+wait_pactl() {
+    i=0
+    while [ "${i}" -lt 12 ]; do
+        if run_as_user /usr/bin/pactl info >/dev/null 2>&1; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+wait_card() {
+    i=0
+    while [ "${i}" -lt 12 ]; do
+        if run_as_user /bin/sh -c \
+            "pactl list short cards 2>/dev/null | awk '\$2 == \"${CARD_NAME}\" {found=1} END{exit(found?0:1)}'" \
+            >/dev/null 2>&1; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+enforce_hw_mixer() {
+    rk_card=""
+    if [ -r /proc/asound/cards ]; then
+        rk_card="$(awk '/rk817|rockchip-rk817/ {print $1; exit}' /proc/asound/cards | tr -d ' ' || true)"
+    fi
+    [ -n "${rk_card}" ] || return 0
+
+    /usr/bin/amixer -q -c "${rk_card}" cset name='Resume Path' ON >/dev/null 2>&1 || true
+    /usr/bin/amixer -q -c "${rk_card}" cset name='Playback Path' OFF >/dev/null 2>&1 || true
+    sleep 1
+    for path in SPK SPK_HP HP RCV; do
+        /usr/bin/amixer -q -c "${rk_card}" cset name='Playback Path' "${path}" >/dev/null 2>&1 && break
+    done
+    /usr/bin/amixer -q -c "${rk_card}" cset name='Speaker Switch' on >/dev/null 2>&1 || true
+    /usr/bin/amixer -q -c "${rk_card}" cset name='DAC Playback Volume' 230,230 >/dev/null 2>&1 || true
+}
+
+get_sink() {
+    run_as_user /bin/sh -c \
+        "pactl list short sinks 2>/dev/null | awk '\
+            \$2 ~ /^alsa_output\\.platform-rk817-sound\\./ && \$2 !~ /\\.monitor\$/ {print \$2; exit}
+            \$2 ~ /analog-stereo/ && \$2 !~ /\\.monitor\$/ {print \$2; exit}
+        '" 2>/dev/null || true
+}
+
+get_source() {
+    run_as_user /bin/sh -c \
+        "pactl list short sources 2>/dev/null | awk '\
+            \$2 ~ /^alsa_input\\.platform-rk817-sound\\./ {print \$2; exit}
+            \$2 ~ /analog-stereo/ && \$2 !~ /\\.monitor\$/ && \$2 != \"virtual-mic\" {print \$2; exit}
+        '" 2>/dev/null || true
+}
+
+restart_user_audio() {
+    log "fallback: restarting user audio services"
+    run_as_user /usr/bin/systemctl --user restart \
+        pipewire.service wireplumber.service pipewire-pulse.service >/dev/null 2>&1 || true
+    sleep 1
+}
+
+move_streams_to_sink() {
+    sink="$1"
+    [ -n "${sink}" ] || return 0
+
+    for input_id in $(run_as_user /bin/sh -c \
+        "pactl list short sink-inputs 2>/dev/null | awk '{print \$1}'" \
+        2>/dev/null || true); do
+        run_as_user /usr/bin/pactl move-sink-input "${input_id}" "${sink}" >/dev/null 2>&1 || true
+    done
+}
+
+queue_delayed_user_fix() {
+    # Re-apply default sink/source shortly after wake when session graph settles.
+    run_as_user /bin/sh -c \
+        '(sleep 2; /usr/local/bin/rk-audio-session-fix.sh >/dev/null 2>&1 || true; \
+          sleep 3; /usr/local/bin/rk-audio-session-fix.sh >/dev/null 2>&1 || true) &' \
+        >/dev/null 2>&1 || true
+}
+
+apply_routing() {
+    run_as_user /usr/bin/pactl set-card-profile \
+        "${CARD_NAME}" pro-audio >/dev/null 2>&1 || \
+    run_as_user /usr/bin/pactl set-card-profile \
+        "${CARD_NAME}" output:stereo-fallback+input:stereo-fallback >/dev/null 2>&1 || true
+
+    sink="$(get_sink)"
+    if [ -n "${sink}" ]; then
+        run_as_user /usr/bin/pactl set-default-sink "${sink}" >/dev/null 2>&1 || true
+        run_as_user /usr/bin/pactl set-sink-mute "${sink}" 0 >/dev/null 2>&1 || true
+        run_as_user /usr/local/bin/rk-audio-volume-state.sh restore >/dev/null 2>&1 || true
+        move_streams_to_sink "${sink}"
+    fi
+
+    source="$(get_source)"
+    if [ -n "${source}" ]; then
+        run_as_user /usr/bin/pactl set-default-source "${source}" >/dev/null 2>&1 || true
+        run_as_user /usr/bin/pactl set-source-mute "${source}" 0 >/dev/null 2>&1 || true
+    fi
+
+    log "resume audio recovery applied sink=${sink:-none} source=${source:-none}"
+}
+
+fix_user_audio() {
+    enforce_hw_mixer || true
+
+    if ! wait_pactl; then
+        log "pactl not ready"
+        return 1
+    fi
+
+    if ! wait_card; then
+        log "card not visible, attempting fallback restart"
+        restart_user_audio
+        wait_pactl || true
+        wait_card || true
+    fi
+
+    apply_routing
+    queue_delayed_user_fix
+
+    if [ -z "$(get_sink)" ]; then
+        log "sink still missing, final fallback restart"
+        restart_user_audio
+        wait_pactl || true
+        apply_routing
+    fi
+
+    enforce_hw_mixer || true
+    return 0
+}
+
+if [ "${1:-}" != "post" ]; then
+    exit 0
+fi
+
+case "${2:-}" in
+    suspend|hibernate|hybrid-sleep|suspend-then-hibernate|"")
+        log "resume hook action=${2:-unknown} begin"
+        /usr/local/sbin/rk-audio-init.sh >/dev/null 2>&1 || true
+        sleep 1
+        fix_user_audio || true
+        ;;
+esac
+
+exit 0
+RK_AUDIO_RESUME
+chmod +x "${ROOTFS_MNT}/usr/local/sbin/rk-audio-resume.sh"
+
+mkdir -p "${ROOTFS_MNT}/lib/systemd/system-sleep"
+cat > "${ROOTFS_MNT}/lib/systemd/system-sleep/rk-audio-resume" << 'RK_AUDIO_RESUME_SLEEP'
+#!/bin/sh
+exec /usr/local/sbin/rk-audio-resume.sh "$@"
+RK_AUDIO_RESUME_SLEEP
+chmod +x "${ROOTFS_MNT}/lib/systemd/system-sleep/rk-audio-resume"
 
 # 10. USB role manager service (OTG host + charging)
 if [ -f "${ROOT_DIR}/overlay/usb-mode-switch.sh" ] && [ -f "${ROOT_DIR}/overlay/usb-role-manager.service" ]; then
