@@ -1242,6 +1242,9 @@ STARTUP_SETTLE_SEC="${STARTUP_SETTLE_SEC:-2}"
 LANDSCAPE_PRIME_ON_STARTUP="${LANDSCAPE_PRIME_ON_STARTUP:-1}"
 LANDSCAPE_PRIME_DELAY="${LANDSCAPE_PRIME_DELAY:-0.20}"
 RESYNC_POLLS="${RESYNC_POLLS:-20}"
+FORCE_LANDSCAPE_ON_STARTUP="${FORCE_LANDSCAPE_ON_STARTUP:-1}"
+FORCE_LANDSCAPE_DELAY="${FORCE_LANDSCAPE_DELAY:-1.5}"
+FORCE_LANDSCAPE_FALLBACK="${FORCE_LANDSCAPE_FALLBACK:-$X_NEG_TRANSFORM}"
 # Prefer Phosh's DisplayConfig API so shell components relayout in sync
 # during rotation. If it glitches, we fail over to wlr-randr and retry.
 DISPLAYCONFIG_ENABLED="${DISPLAYCONFIG_ENABLED:-1}"
@@ -1475,6 +1478,28 @@ choose_transform() {
   fi
 }
 
+startup_landscape_transform() {
+  local line x y z candidate
+
+  line="$(cat "$AXIS_FILE" 2>/dev/null || true)"
+  if [[ "$line" =~ x=[[:space:]]*(-?[0-9]+)\;y=[[:space:]]*(-?[0-9]+)\;z=[[:space:]]*(-?[0-9]+) ]]; then
+    x="${BASH_REMATCH[1]}"
+    y="${BASH_REMATCH[2]}"
+    z="${BASH_REMATCH[3]}"
+    candidate="$(choose_transform "$x" "$y" "$z")"
+    if [[ "$candidate" == "90" || "$candidate" == "270" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  if [[ "$FORCE_LANDSCAPE_FALLBACK" == "90" || "$FORCE_LANDSCAPE_FALLBACK" == "270" ]]; then
+    echo "$FORCE_LANDSCAPE_FALLBACK"
+  else
+    echo "$X_NEG_TRANSFORM"
+  fi
+}
+
 for _ in $(seq 1 30); do
   if detect_wayland_display; then
     break
@@ -1518,6 +1543,19 @@ last_lockscreen_state=""
 prelock_transform="$(cat "$PRELOCK_FILE" 2>/dev/null || true)"
 startup_prime_done=0
 loop_count=0
+
+if [[ "${FORCE_LANDSCAPE_ON_STARTUP}" != "0" ]]; then
+  startup_target="$(startup_landscape_transform)"
+  if [[ "${FORCE_LANDSCAPE_DELAY}" != "0" ]]; then
+    sleep "$FORCE_LANDSCAPE_DELAY"
+  fi
+  if [[ -n "$startup_target" ]]; then
+    apply_transform "$startup_target" 1
+    prelock_transform="$startup_target"
+    printf '%s' "$prelock_transform" > "$PRELOCK_FILE" 2>/dev/null || true
+    log "startup force landscape transform=$startup_target"
+  fi
+fi
 
 while true; do
   loop_count=$((loop_count + 1))
