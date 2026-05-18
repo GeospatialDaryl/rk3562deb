@@ -46,7 +46,7 @@ The resulting image is written to an SD card. Insert it and power on — the tab
 | **Bluetooth** | ✅ Full |
 | **Speaker / Audio output** | ✅ Full |
 | **Microphone** | ✅ Full |
-| **3D Acceleration** | ⚠️ Partial (Panfrost, OpenGL ES works) |
+| **3D Acceleration** | ⚠️ Partial (default image uses `mali` vendor stack; `panfrost` is an optional build profile) |
 | **NPU (RKLLM / rknn-llm)** | ✅ Active (RK3562 supports one NPU core, `num_npu_core=1`) |
 | **Accelerometer** | ✅ Full (SC7A20 / DA223) |
 | **Flashlight (rear LED)** | ✅ Full (native Phosh top-menu torch toggle + brightness control via `rk-flashlightctl`) |
@@ -56,6 +56,8 @@ The resulting image is written to an SD card. Insert it and power on — the tab
 | **Battery / Charging** | ✅ Full (RK817 PMIC) |
 | **SD card boot** | ✅ Full |
 | **USB OTG** | ✅ Full |
+
+> **Note:** the public pre-release image linked above is built with `RKDEBIAN_GPU_STACK=mali` unless explicitly stated otherwise.
 
 ## Default Installed Apps
 
@@ -288,7 +290,7 @@ RKDEBIAN_CPU_GOVERNOR=schedutil ./build.sh all
 # Show CLI usage and target list
 ./build.sh --help
 
-# Build a Phosh image on Mesa/Panfrost (clean rootfs strongly advised)
+# Build a Phosh image on Mesa/Panfrost (optional profile, clean rootfs strongly advised)
 ./build.sh all --ui-session=phosh --gpu-stack=panfrost --force-clean-rootfs
 
 # Mali stack with Debian libgbm override (only for compatibility testing)
