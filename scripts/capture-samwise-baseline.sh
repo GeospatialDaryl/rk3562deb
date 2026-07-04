@@ -187,6 +187,9 @@ run_remote "MPP service"        "ls -la /dev/mpp_service 2>/dev/null || echo 'n/
 run_remote "RGA device"         "ls -la /dev/rga 2>/dev/null || echo 'n/a'" "sysfs/rga-device.txt"
 run_remote "NPU devfreq"        "find /sys/class/devfreq/ -name '*npu*' -exec sh -c 'echo \"\$1: governor=\$(cat \"\$1/governor\" 2>/dev/null) cur_freq=\$(cat \"\$1/cur_freq\" 2>/dev/null)\"' _ {} \\; 2>/dev/null" "sysfs/npu-devfreq.txt"
 run_remote "RKNN device"        "ls -la /dev/rknpu* 2>/dev/null || echo 'n/a'" "sysfs/rknn-device.txt"
+run_remote "RKNPU driver ver"   "sudo -n cat /sys/kernel/debug/rknpu/version 2>/dev/null || cat /sys/kernel/debug/rknpu/version 2>/dev/null || dmesg 2>/dev/null | grep -i 'rknpu.*driver' || echo 'n/a (debugfs needs root)'" "sysfs/rknpu-driver-version.txt"
+run_remote "librknnrt version"  "f=\$(find /usr/lib /usr/lib64 /usr/local/lib /oem -name 'librknnrt.so*' 2>/dev/null | head -1); if [ -n \"\$f\" ]; then echo \"\$f\"; grep -aoh 'librknnrt version[^)]*)' \"\$f\" | head -1; else echo 'n/a'; fi" "sysfs/librknnrt-version.txt"
+run_remote "RKLLM runtime"      "f=\$(find /usr/lib /usr/lib64 /usr/local/lib /oem -name 'librkllmrt.so*' 2>/dev/null | head -1); if [ -n \"\$f\" ]; then echo \"\$f\"; grep -aoh 'rkllm-runtime[^,)]*' \"\$f\" | head -1; else echo 'n/a'; fi" "sysfs/rkllm-runtime.txt"
 
 # --- Userland Services ---
 echo "--- Userland Services ---"

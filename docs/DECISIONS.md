@@ -115,3 +115,20 @@ Each decision is numbered and includes: context, decision, rationale, and conseq
 **Decision:** Candidate Armbian images targeting SD card will use extlinux.conf, matching the existing proven SD card boot path. This is compatible with Armbian's standard boot mechanism.
 
 **Consequences:** Armbian's extlinux-based boot is aligned with the SD card path. No custom boot script needed for Track A.
+
+---
+
+## D008: NPU uses the vendor RKNPU stack; NPU enablement pins Track A to the vendor kernel
+
+**Date:** 2026-07-04
+**Status:** Accepted
+
+**Context:** The stock system runs RKNN/RKLLM workloads on the RK3562's 1-TOPS NPU via the vendor `rknpu` kernel driver (0.9.7 in the pinned rk35xx-vendor-6.1 tree) plus Rockchip's `librknnrt` userspace. The mainline "rocket" DRM accel driver supports RK3588 only, with no announced RK3562 support; an out-of-tree DKMS module exists for RK356x but is unproven. Audit of the first built image (2026-06-20, vendor 6.1.75) found `rk3562.dtsi` leaves the NPU and its IOMMU `status = "disabled"` and `rk3562-rk817-tablet-v10.dts` never enables them, while the stock DTB (baseline `device-tree/fdt.dts`) runs the NPU enabled with `rknpu-supply` on the `vdd_npu` PWM regulator.
+
+**Decision:** Track A uses the vendor RKNPU stack exclusively: in-tree `rknpu` driver, DT nodes enabled via userpatch `enable-rknpu-rk3562-rk817-tablet.patch` (mirrors stock/EVB wiring: `&rknpu` okay + `rknpu-supply = <&vdd_npu>`, `&rknpu_mmu` okay), and `librknnrt`/RKLLM packaged as opt-in, separately versioned userland. CPU inference (XNNPACK/onnxruntime) is a correctness reference only; GPU (Mali-G52) inference is out of scope.
+
+**Rationale:** The vendor stack is the only production-viable NPU path for RK3562 and is already proven on this exact tablet. `librknnrt` enforces a minimum kernel-driver version, so driver and runtime versions must be recorded together (baseline capture now collects both).
+
+**Consequences:** NPU support anchors samwise to the vendor 6.1 kernel; any Track B (newer kernel) candidate is expected to lose NPU functionality until mainline gains RK3562 support, and must record that gap explicitly. Stock driver/runtime versions must be captured from the device before reflashing (`/sys/kernel/debug/rknpu/version`, `librknnrt.so` version string) to confirm the ≤ 0.9.7 compatibility assumption.
+
+**Update (2026-07-04):** Provenance captured from the stock device: RKNPU driver **v0.9.8**, librknnrt **2.3.2** (2025-04-09). The pinned tree's 0.9.7 driver is below RKLLM's documented ≥ 0.9.8 minimum, so upstream commit `736d89f34415` ("driver: rknpu: Update rknpu driver, version: 0.9.8", rk-6.1-rkr4.1) is backported as userpatch `rknpu-driver-0.9.8-backport.patch` alongside the DT enable patch. The pristine commit applies cleanly to the rkr3 tree; the intermediate rk3576 devfreq change was deliberately excluded (depends on `rockchip_opp_set_low_length`, absent from the pinned tree).

@@ -13,10 +13,11 @@ prebuilt_rootfs/
 uart.log
 
 # Downloaded/upstream source trees (re-cloned by build scripts)
-src/
-kernel
-u-boot
-rkbin
+# (root-anchored: bare patterns also matched platform/armbian/userpatches/kernel|u-boot)
+/src/
+/kernel/
+/u-boot/
+/rkbin/
 
 # Local SDK selection cache
 .rk_lunch
