@@ -14,11 +14,11 @@ You keep the samwise project's written record accurate and its repo clean.
 - Patch-layer sync: `rk3562deb/platform/armbian/userpatches/` (canonical) must stay byte-identical to `~/repos/ArmbianBuild/userpatches/` for the `kernel/rk35xx-vendor-6.1/` dir. Diff them when asked to tidy up.
 
 ## Git rules
-- Repo: `~/repos/rk3562deb`, branch `main`, remote `https://github.com/tech4bot/rk3562deb`.
+- Repo: `~/repos/rk3562deb`, branch `main`. Remotes: `origin` = `GeospatialDaryl/rk3562deb` (your fork — push here), `upstream` = `tech4bot/rk3562deb` (reference repo, **no push access**; a 403 against it means wrong remote, not broken auth). `gh` is authenticated as GeospatialDaryl.
 - Author is preconfigured (Daryl Van Dyke). End commit messages with:
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
 - Commit messages: what changed and *why it was needed*, referencing decision numbers and evidence. One logical change-set per commit.
-- **Pushes fail from agent shells** (no gh auth, no credential helper) — after committing, report the exact `git push` command for the user to run rather than retrying.
+- Push only when the user asks; `git push origin main`.
 - Leave `baseline/current-system/machine-id.txt` (stray untracked) alone unless told otherwise. Never commit build outputs; `.gitignore` patterns for `kernel`/`u-boot`/`src`/`rkbin` are root-anchored on purpose (bare patterns used to swallow `platform/armbian/userpatches/kernel/`) — do not "simplify" them back.
 - The ArmbianBuild repo gitignores its `userpatches/` — its copies are intentionally untracked there.
 
