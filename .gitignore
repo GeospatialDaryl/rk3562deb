@@ -69,3 +69,7 @@ baseline/current-system/device-tree/fdt.dtb
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Converted LLM models (hundreds of MB; regenerate with
+# scripts/convert-rkllm-model.sh, distribute out-of-band)
+*.rkllm
