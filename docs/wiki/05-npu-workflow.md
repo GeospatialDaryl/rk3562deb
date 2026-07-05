@@ -11,7 +11,7 @@ Conrad (x86), inference runs on samwise (ARM64, NPU). The RK3562's unit is
 | Model conversion | `rknn-toolkit2` (Python, x86_64 only) | Conrad |
 | Inference API (C/C++) | `librknnrt.so` — version **2.3.2** proven on this device | samwise |
 | Inference API (Python) | `rknn-toolkit-lite2` (wraps librknnrt) | samwise |
-| LLM runtime | RKLLM (`librkllmrt`) — needs driver ≥ 0.9.8 | samwise |
+| LLM runtime | RKLLM (`librkllmrt`) **1.3.0**, packaged; needs driver ≥ 0.9.8 (on-device confirmed) | samwise |
 | Kernel driver | `rknpu` v0.9.8 (in-kernel, CONFIG_ROCKCHIP_RKNPU=y) | image |
 | Hardware | `npu@ff300000` + IOMMU + `vdd_npu` rail | tablet |
 
@@ -71,11 +71,69 @@ stdout and `sudo cat /sys/kernel/debug/rknpu/load` during inference.
 
 ## RKLLM
 
-Small quantized LLMs (RK3562 support arrived in later RKLLM releases; the
-stock system already runs it, so the capability is proven on this hardware).
-Flow mirrors RKNN: convert/quantize on x86 with `rkllm-toolkit`, run on device
-with `librkllmrt` + the `llm_demo` binary. This is matrix row 18. The driver
-≥ 0.9.8 requirement is the binding constraint the backport satisfies.
+Small quantized LLMs, run on device with `librkllmrt` + the `llm_demo`
+binary. RK3562 has been a supported RKLLM target since upstream
+release-v1.2.0; the current pin is **v1.3.0** (2026-06-17), which requires
+kernel driver **≥ 0.9.8** — the same version the D008 backport provides. This
+is matrix row 18.
+
+### Conversion on Conrad
+
+```bash
+scripts/setup-rkllm-conversion-env.sh          # once: venv at ~/venvs/rkllm
+scripts/convert-rkllm-model.sh Qwen/Qwen3-0.6B w4a16_g64
+# -> tests/hardware/npu-smoke-test/qwen3_0.6b_w4a16_g64_rk3562.rkllm
+```
+
+`setup-rkllm-conversion-env.sh` builds a CPU-only environment (torch 2.6.0
+CPU wheels, `auto_gptq` built from sdist — no cp312 wheel exists) around the
+`rkllm-toolkit` 1.3.0 wheel; `convert-rkllm-model.sh` wraps
+`convert_rkllm_model.py`, which downloads the HF model if needed and calls
+`rkllm.build()` with the RK3562-only quant types enforced by `argparse`
+(below). Converting Qwen3-0.6B to `w4a16_g64` took roughly 10 minutes on
+Conrad's CPU and produced a 751 MiB `.rkllm` (dominated by the fp16
+embedding/tokenizer tables, which w4a16 does not quantize). `.rkllm` outputs
+are gitignored — regenerate them locally, don't commit them.
+
+RK3562 quant types, per `Rockchip_RKLLM_SDK_EN_1.3.0.pdf` Table 3-3 (single
+NPU core only — `num_npu_core` must be 1):
+
+| `quantized_dtype` | Notes |
+|---|---|
+| `w8a8` | 8-bit weights and activations |
+| `w4a16_g32` / `w4a16_g64` / `w4a16_g128` | 4-bit weights, fp16 activations, grouped by the given size; activations aren't quantized so no calibration dataset is required |
+| `w4a8_g32` | 4-bit weights, 8-bit activations, grouped |
+
+(`w4a16` with no group and `w8a8_g*` are valid on other targets — RK3576,
+RV1126B, RK3588 — but rejected for `rk3562` by the conversion script.)
+
+### Runtime packaging and on-device verification
+
+`debs/librkllmrt_1.3.0-2_arm64.deb` ships `librkllmrt.so` 1.3.0, `rkllm.h`
+(pinned to the same upstream tag — mixing tags across a re-package is an ABI
+hazard), a source-built `llm_demo`, and `fix_freq_rk3562.sh`. `llm_demo` must
+be cross-compiled against a **Debian 12 Bookworm arm64 sysroot**, not
+Conrad's native Ubuntu 24.04 cross-toolchain sysroot — the first attempt
+(`-1`, superseded) leaked `GLIBC_2.38`/`GLIBCXX_3.4.32` requirements into the
+binary and failed to start on Bookworm target (`version 'GLIBC_2.38' not
+found`); see the deb's own `/usr/share/doc/librkllmrt/README.samwise` and
+DECISIONS.md D008 (2026-07-05 update) for the full root cause.
+
+Verified 2026-07-05 on the **stock eMMC system** (driver 0.9.8, precedent
+only — not yet run on a flashed candidate image, so this does not close
+matrix row 18):
+
+```
+rkllm-runtime version: 1.3.0, rknpu driver version: 0.9.8, platform: RK3562
+```
+
+with no driver-too-low warning, followed by a correct end-to-end answer from
+the converted Qwen3-0.6B model — the first LLM inference run on this
+project's NPU stack. Token/s was not captured in this pass.
+
+**Staging note:** samwise's `/tmp` is a 512 MiB tmpfs — a several-hundred-MB
+`.rkllm` file will not fit. Stage converted models under `~` (home) on the
+device, not `/tmp`.
 
 ## CPU fallback as correctness reference (D008)
 
@@ -84,16 +142,16 @@ diff outputs against the NPU results when debugging quantization or runtime
 issues. It is not a serving path — four A53s are no match for even 1 TOPS of
 INT8 — and GPU (Mali-G52) inference is explicitly out of scope.
 
-## Packaging the runtime (planned, per spec `NPU_RUNTIME: opt-in, separately versioned`)
+## Packaging the runtime, per spec `NPU_RUNTIME: opt-in, separately versioned`
 
-The runtime must ship as versioned opt-in debs in the overlay (`rk3562deb`
+The runtime ships as versioned opt-in debs in the overlay (`rk3562deb`
 `debs/` dir feeding image customization), **not** baked into the base image:
 
-- `librknnrt` deb: `/usr/lib/librknnrt.so` (2.3.2 binary from the
-  rknn-toolkit2 repo or captured from stock), C headers, and a known-good
-  sample + model as a smoke test.
-- RKLLM deb: `librkllmrt.so` + `llm_demo` + a small test model, versioned
-  separately.
-
-Until those debs exist, copying `/usr/lib/librknnrt.so` off the stock system
-onto a candidate image is an acceptable interim for matrix row 17.
+- RKLLM deb: `debs/librkllmrt_1.3.0-2_arm64.deb` — `librkllmrt.so` +
+  `rkllm.h` + source-built `llm_demo` + `fix_freq_rk3562.sh`, as described
+  above. **Exists and is on-device verified** (stock system, 2026-07-05); the
+  "copy the stock `.so` onto a candidate image" workaround is now obsolete
+  for RKLLM.
+- `librknnrt` deb: not yet packaged in this repo. Copying
+  `/usr/lib/librknnrt.so` off the stock system onto a candidate image
+  remains the interim workaround for matrix row 17.

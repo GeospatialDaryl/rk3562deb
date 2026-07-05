@@ -16,7 +16,7 @@ repos, artifacts, and the physical device unless explicitly marked *future*.
 
 Related documents outside this wiki:
 
-- `../DECISIONS.md` — numbered decision log (D001–D008); D008 covers the NPU stack
+- `../DECISIONS.md` — numbered decision log (D001–D009); D008 covers the NPU stack, D009 the ggml/llama.cpp deferral
 - `../HARDWARE_TEST_MATRIX.md` — the 20-row acceptance matrix; NPU is rows 17–18
 - `../ARCHITECTURE.md` — layered repo architecture (upstream / overlay / evidence / tooling)
 - `../../baseline/current-system/` — evidence captured from the stock device
