@@ -152,6 +152,11 @@ The runtime ships as versioned opt-in debs in the overlay (`rk3562deb`
   above. **Exists and is on-device verified** (stock system, 2026-07-05); the
   "copy the stock `.so` onto a candidate image" workaround is now obsolete
   for RKLLM.
-- `librknnrt` deb: not yet packaged in this repo. Copying
-  `/usr/lib/librknnrt.so` off the stock system onto a candidate image
-  remains the interim workaround for matrix row 17.
+- `librknnrt` deb: `debs/librknnrt_2.3.2-1_arm64.deb` — `librknnrt.so` 2.3.2
+  (binary from `airockchip/rknn-toolkit2` tag v2.3.2; version string matches
+  the 2026-07-04 stock-device capture) plus the `rknn/` C headers. **Exists**;
+  the "copy the stock `.so` onto a candidate image" workaround is now obsolete
+  for RKNN too. Not yet run on a flashed candidate image — matrix row 17
+  stays open; `tests/hardware/npu-smoke-test/` is the self-contained kit
+  (MobileNetV2 fp16 model, conversion script, device wheel, smoke-test
+  runner) to close it.
