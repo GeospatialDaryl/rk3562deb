@@ -63,6 +63,57 @@ display/touch/Wi-Fi rows first — an image that loses those is a regression
 regardless of NPU state). `scripts/collect-target-test-report.sh --host
 frodo@<tablet-ip>` automates capture and comparison against the baseline.
 
+## Session-001 kit (full 20-row operator flow, automated)
+
+`../../tests/hardware/session-001/` is the maintained runbook + automation
+for a complete candidate-image validation pass — it doesn't replace the
+safety rails above, it operationalizes the steps that follow them. End-to-end
+operator flow:
+
+1. **Flash.** Follow `session-001/README.md` section 1 (pre-flight): confirm
+   the image's sha256 by eye, triple-check the target device with `lsblk`,
+   then `scripts/flash-image-safely.sh`.
+2. **Boot.** README section 2: watch the screen for a clean login (matrix row
+   1), fall back to the ttyS0 @ 1500000 serial console if the display never
+   lights up.
+3. **Capture.** From Conrad, once the tablet has an IP:
+   `session-001/run-remote.sh --host <tablet-ip>`. This copies
+   `capture-matrix.sh` to the tablet, runs it there (all 20 matrix rows,
+   each row isolated so one failure never aborts the rest, each ending in a
+   `VERDICT: PASS|FAIL|MANUAL|SKIP` line), and pulls the evidence directory
+   back to `session-001/evidence/session-001-<timestamp>/` on Conrad.
+4. **NPU rows 17–18.** `capture-matrix.sh` only probes driver version,
+   devfreq binding, and runtime-library presence for these rows — it
+   deliberately does not run inference. Closing them is
+   `../../tests/hardware/npu-smoke-test/`'s job: on a freshly-flashed
+   candidate (SD-boot) image, `npu-smoke-test/deploy-to-candidate.sh
+   <tablet-ip>` (Conrad-side; pushes both runtime debs, the Qwen3 model, the
+   MobileNetV2 `.rknn`, and the rknnlite wheel — the SD-booted rootfs is
+   fresh and has none of the stock system's staged files), then
+   `~/npu-smoke-test/run-candidate-smoke.sh` on the tablet. See
+   [05 — NPU Development Workflow](05-npu-workflow.md) for the stack details
+   and `npu-smoke-test/README.md` for the full procedure.
+5. **Fold into the record.** Close out MANUAL rows by hand, fold in the NPU
+   kit's rows 17–18 result, cross-check against the baseline, and record
+   final per-row verdicts in `../HARDWARE_TEST_MATRIX.md`. Neither kit
+   writes to the matrix or `DECISIONS.md` itself — that's a manual step.
+
+Two gotchas the first (session-001) run of this kit surfaced, worth knowing
+before flashing any build produced the same way:
+
+- The candidate image's `.img.sha` sidecar (as emitted by this build)
+  records the build's `.tmp/` staging path, not the final output path, so
+  `sha256sum --check <image>.sha` fails even when the hash itself is
+  correct — compare the printed hash value by eye instead.
+- `manifests/images/` is currently empty; no manifest exists yet for this
+  build, so `flash-image-safely.sh --manifest` verification isn't available
+  for it.
+
+Evidence pulled back by `run-remote.sh` (and by the npu-smoke-test kit) is
+gitignored and treated as disposable/regenerable — the permanent record of
+a session's results is `../HARDWARE_TEST_MATRIX.md` itself, referencing the
+evidence path and date.
+
 ## Recording results
 
 Per the matrix: record date, image manifest reference, actual command output
