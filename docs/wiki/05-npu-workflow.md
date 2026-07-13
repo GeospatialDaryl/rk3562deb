@@ -131,6 +131,23 @@ with no driver-too-low warning, followed by a correct end-to-end answer from
 the converted Qwen3-0.6B model — the first LLM inference run on this
 project's NPU stack. Token/s was not captured in this pass.
 
+**Candidate (SD-boot) image procedure:** `tests/hardware/npu-smoke-test/`
+now has a dedicated candidate-image flow, built for the session-001
+validation kit (`../../tests/hardware/session-001/`) — as of 2026-07-12 it
+has not yet been executed against hardware, so matrix rows 17 and 18 are
+still open. On Conrad: `npu-smoke-test/deploy-to-candidate.sh <tablet-ip>`
+pushes `librknnrt_2.3.2-1_arm64.deb`, `librkllmrt_1.3.0-2_arm64.deb`, the
+Qwen3 `.rkllm`, the MobileNetV2 `.rknn`, and the rknnlite wheel to the
+tablet's home directory (the SD-booted rootfs is fresh — nothing staged on
+the stock eMMC system, like the old `~/rkllm-smoke/`, is present after SD
+boot) and installs the debs. On the tablet:
+`~/npu-smoke-test/run-candidate-smoke.sh` runs rows 17 and 18 isolated (a
+row-17 failure never blocks row 18), with `RKLLM_LOG_LEVEL=1` set so
+`librkllmrt` prints its Prefill/Generate perf table — the first tok/s
+datapoint captured for this stack, once run. See
+`tests/hardware/npu-smoke-test/README.md` for the full procedure, PASS
+criteria, and gotchas (clock pinning, `<think>`-block token budget, etc.).
+
 **Staging note:** samwise's `/tmp` is a 512 MiB tmpfs — a several-hundred-MB
 `.rkllm` file will not fit. Stage converted models under `~` (home) on the
 device, not `/tmp`.
