@@ -9,16 +9,24 @@ Candidate under test (CLI image; the `_xfce_desktop` variant is a later
 session):
 
 ```
-/home/frodo/repos/ArmbianBuild/output/images/Armbian-unofficial_24.11.0-trunk_Doogee-u10_bookworm_vendor_6.1.75.img
+/home/frodo/repos/ArmbianBuild/output/images/Armbian-unofficial_24.11.0-trunk_Doogee-u10_bookworm_vendor_6.1.75-sdboot.img
 ```
 
+- **Flash the `-sdboot` variant, not the raw build output.** The raw Armbian
+  image ships with no bootloader (`BOOTCONFIG="none"`; first boot attempt
+  2026-07-14 fell into the eMMC's Android Recovery). The `-sdboot` variants
+  are byte-identical copies with the proven idbloader + u-boot.itb grafted
+  in via `graft-bootloader.sh` (provenance in `loader/README.md`).
 - Kernel: 6.1.75 (vendor), built 2026-07-04
 - NPU DT-enable + rknpu 0.9.8 backport confirmed baked in (see
   `docs/wiki/03-npu-enablement.md`)
-- sha256: `6055717db7f00e8bd08b9c7e5e7b567b59bc3fcdec34f286a65931a3a5a1a3b6`
-  (verified against the on-disk file 2026-07-12; see Pre-flight below —
-  **do not** trust the `.sha` sidecar's embedded path, it points at the
-  build's `.tmp/` staging dir, not this file; compare the hash value only)
+- sha256 (CLI `-sdboot`, 2026-07-14):
+  `4c8dc125c0583e0b445c0395d7771644436cfb6103dcae3b3956ac18d0597587`
+  — a proper checkable sidecar exists: `sha256sum --check
+  sdboot-images.sha256` in the images dir covers both `-sdboot` variants
+  (XFCE `-sdboot`: `dfadcfb7…cdd7c405`). The raw build's own `.sha` sidecar
+  is still broken (embeds the build's `.tmp/` path); raw CLI image hash for
+  reference: `6055717db7f00e8bd08b9c7e5e7b567b59bc3fcdec34f286a65931a3a5a1a3b6`
 
 No `manifests/images/*.json` manifest exists yet for this build (that
 directory is currently empty). Until one exists, `flash-image-safely.sh
@@ -50,14 +58,11 @@ passing `--manifest` in the first place.
 ```bash
 cd ~/repos/rk3562deb
 
-IMG=~/repos/ArmbianBuild/output/images/Armbian-unofficial_24.11.0-trunk_Doogee-u10_bookworm_vendor_6.1.75.img
+IMG=~/repos/ArmbianBuild/output/images/Armbian-unofficial_24.11.0-trunk_Doogee-u10_bookworm_vendor_6.1.75-sdboot.img
 
-# 1a. Confirm the image's actual hash matches the one recorded above.
-#     (Don't use `sha256sum --check "$IMG.sha"` as-is — its sidecar embeds
-#     the build's temp path, not this path, so the check line won't match.
-#     Compare the printed hash by eye instead.)
-sha256sum "$IMG"
-# expect: 6055717db7f00e8bd08b9c7e5e7b567b59bc3fcdec34f286a65931a3a5a1a3b6
+# 1a. Confirm the image's actual hash (the -sdboot sidecar is checkable):
+(cd "$(dirname "$IMG")" && sha256sum --check sdboot-images.sha256)
+# expect: ...-sdboot.img: OK (both variants)
 
 # 1b. Insert the target microSD card into Conrad and identify it.
 #     TRIPLE-CHECK this is the SD card and not any other disk on Conrad.

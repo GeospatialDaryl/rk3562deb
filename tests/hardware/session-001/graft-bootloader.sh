@@ -63,9 +63,9 @@ dd if="$ITB" of="$TARGET" bs=512 seek=16384 conv=fsync,notrunc status=none
 sync
 
 echo "Verifying signatures on target..."
-IDB_MAGIC="$(xxd -l 4 -s 32768 "$TARGET" | awk '{print $NF}')"
+IDB_MAGIC="$(xxd -p -l 4 -s 32768 "$TARGET")"
 ITB_MAGIC="$(xxd -p -l 4 -s $((8*1024*1024)) "$TARGET")"
-[[ "$IDB_MAGIC" == "LDR " ]] || die "idbloader magic not found after write (got '$IDB_MAGIC')"
+[[ "$IDB_MAGIC" == "4c445220" ]] || die "idbloader magic not found after write (got '$IDB_MAGIC', want 4c445220 'LDR ')"
 [[ "$ITB_MAGIC" == "d00dfeed" ]] || die "FIT magic not found after write (got '$ITB_MAGIC')"
 
 echo "OK: idbloader ('LDR ') at 32 KiB, u-boot FIT (d00dfeed) at 8 MiB."
